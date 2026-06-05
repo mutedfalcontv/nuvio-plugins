@@ -204,3 +204,5 @@ function isMatch(normalized, itemNormalized) {
   }
   return matchCount >= 2;
 }
+
+module.exports = { getStreams };
