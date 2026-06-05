@@ -10,7 +10,7 @@
       "description": "SubsPlease anime direct downloads",
       "version": "1.0.0",
       "filename": "subsplease.js",
-      "supportedTypes": ["movie", "series"],
+      "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],
       "logo": "https://subsplease.org/favicon.ico"
     }

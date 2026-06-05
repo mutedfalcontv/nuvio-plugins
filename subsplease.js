@@ -1,11 +1,11 @@
 var SUBSIMAGES_BASE = "https://subsplease.org";
 var RSS_FEED = "https://subsplease.org/rss";
 
-async function getStreams(tmdbId, type, season, episode) {
+async function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    if (type === "movie") return [];
+    if (mediaType !== "tv") return [];
 
-    var title = await getTmdbTitle(tmdbId, type);
+    var title = await getTmdbTitle(tmdbId, mediaType);
     if (!title) return [];
 
     var rssXml = await fetchXml(RSS_FEED);
@@ -24,8 +24,7 @@ async function getStreams(tmdbId, type, season, episode) {
   }
 }
 
-async function getTmdbTitle(tmdbId, type) {
-  var mediaType = type === "series" ? "tv" : "movie";
+async function getTmdbTitle(tmdbId, mediaType) {
   var url = "https://api.themoviedb.org/3/" + mediaType + "/" + tmdbId + "?api_key=" + TMDB_API_KEY;
   try {
     var resp = await fetch(url);
