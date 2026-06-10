@@ -1,0 +1,18 @@
+{
+  "name": "Nyaa Anime",
+  "version": "1.0.0",
+  "description": "Anime torrents from Nyaa.si — RSS-based episode matching with magnet links",
+  "author": "ajinkyajacob",
+  "scrapers": [
+    {
+      "id": "nyaa",
+      "name": "Nyaa",
+      "description": "Anime torrents from Nyaa.si",
+      "version": "1.0.0",
+      "filename": "nyaa.js",
+      "supportedTypes": ["tv"],
+      "contentLanguage": ["en", "ja"],
+      "logo": "https://nyaa.si/static/img/avatar/default.png"
+    }
+  ]
+}

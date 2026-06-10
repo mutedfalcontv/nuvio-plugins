@@ -1,18 +1,28 @@
 {
-  "name": "SubsPlease Anime",
-  "version": "1.0.0",
-  "description": "Stream anime directly from SubsPlease with 1080p, 720p, and 480p direct download links",
+  "name": "Anime Bundle",
+  "version": "1.1.0",
+  "description": "SubsPlease direct downloads + Nyaa.si anime torrents",
   "author": "ajinkyajacob",
   "scrapers": [
     {
       "id": "subsplease",
       "name": "SubsPlease",
       "description": "SubsPlease anime direct downloads",
-      "version": "1.0.0",
-      "filename": "subsplease.js",
+      "version": "1.1.0",
+      "filename": "subsplease-nuvio/subsplease.js",
       "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],
       "logo": "https://subsplease.org/favicon.ico"
+    },
+    {
+      "id": "nyaa",
+      "name": "Nyaa",
+      "description": "Anime torrents from Nyaa.si",
+      "version": "1.0.0",
+      "filename": "nyaa-nuvio/nyaa.js",
+      "supportedTypes": ["tv"],
+      "contentLanguage": ["en", "ja"],
+      "logo": "https://nyaa.si/static/img/avatar/default.png"
     }
   ]
 }
