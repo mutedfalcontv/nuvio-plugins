@@ -1,7 +1,7 @@
 {
-  "name": "Anime Bundle",
-  "version": "1.1.0",
-  "description": "SubsPlease direct downloads + Nyaa.si anime torrents",
+  "name": "Nuvio Stream Bundle",
+  "version": "1.2.0",
+  "description": "SubsPlease anime + Nyaa.si torrents + Bollyzon Indian TV series",
   "author": "ajinkyajacob",
   "scrapers": [
     {
@@ -23,6 +23,16 @@
       "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],
       "logo": "https://nyaa.si/static/img/avatar/default.png"
+    },
+    {
+      "id": "bollyzon",
+      "name": "Bollyzon",
+      "description": "Bollywood TV series & movies from BollyZone.to",
+      "version": "1.0.0",
+      "filename": "bollyzon-nuvio/bollyzon.js",
+      "supportedTypes": ["tv", "movie"],
+      "contentLanguage": ["hi"],
+      "logo": "https://www.bollyzone.to/favicon.ico"
     }
   ]
 }
