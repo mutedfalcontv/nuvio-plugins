@@ -1,12 +1,16 @@
 async function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    if (mediaType !== "tv" && mediaType !== "series") return [];
+    console.error("SubsPlease start:", tmdbId, mediaType, "S" + season + "E" + episode);
+    if (mediaType !== "tv" && mediaType !== "series" && mediaType !== "anime") return [];
 
+    var tmdbType = mediaType === "anime" ? "tv" : mediaType;
     var isKitsu = typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0;
 
     var absoluteEp = isKitsu ? null : await getAbsoluteEpisodeNumber(tmdbId, season, episode);
+    console.error("absoluteEp:", absoluteEp);
 
-    var titles = isKitsu ? await getKitsuTitles(tmdbId) : await getTmdbTitles(tmdbId, mediaType);
+    var titles = isKitsu ? await getKitsuTitles(tmdbId) : await getTmdbTitles(tmdbId, tmdbType);
+    console.error("titles:", titles ? titles.join(", ") : "none");
     if (!titles || titles.length === 0) return [];
 
     var slugs = [];
@@ -16,10 +20,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         if (slugs.indexOf(tSlugs[si]) === -1) slugs.push(tSlugs[si]);
       }
     }
+    console.error("slugs:", slugs.join(", "));
 
     var displayTitle = titles[0];
     for (var si = 0; si < slugs.length; si++) {
+      console.error("trying slug:", slugs[si]);
       var pageResults = await scrapeShowPage(slugs[si], displayTitle, absoluteEp);
+      console.error("slug result count:", pageResults.length);
       if (pageResults.length > 0) return pageResults;
     }
     return [];
