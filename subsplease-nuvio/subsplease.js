@@ -40,6 +40,19 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       console.error("SP: slug result", pageResults.length);
       if (pageResults.length > 0) return pageResults;
     }
+
+    var seasonNum = parseInt(season, 10);
+    if (seasonNum > 1 && slugs.length > 0) {
+      console.error("SP: trying season pages for S" + seasonNum);
+      for (var si = 0; si < slugs.length; si++) {
+        var sSlug = slugs[si] + "-s" + seasonNum;
+        console.error("SP: try season slug", sSlug);
+        var sResults = await scrapeSeasonPage(sSlug, episode);
+        console.error("SP: season slug result", sResults.length);
+        if (sResults.length > 0) return sResults;
+      }
+    }
+
     console.error("SP: no match");
     return [];
   } catch (e) {
@@ -249,6 +262,82 @@ async function scrapeShowPage(slug, targetEp) {
     return results;
   } catch (e) {
     console.error("Show page scrape failed:", e.message);
+    return [];
+  }
+}
+
+async function scrapeSeasonPage(seasonSlug, episode) {
+  try {
+    var url = "https://subsplease.org/shows/" + seasonSlug + "/";
+    console.error("SP: fetching season page", url);
+    var resp = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+    var html = await resp.text();
+    if (!html || html.indexOf("404") !== -1) { console.error("SP: season page 404"); return []; }
+
+    var $ = cheerio.load(html);
+    var sid = $('#show-release-table').attr('sid');
+    if (!sid) { console.error("SP: season page no sid"); return []; }
+    console.error("SP: season page sid", sid);
+
+    var apiResp = await fetch("https://subsplease.org/api/?f=show&tz=UTC&sid=" + sid);
+    var apiData = await apiResp.json();
+    if (!apiData || typeof apiData !== "object") { console.error("SP: season api no data"); return []; }
+
+    var episodes = apiData.episode;
+    if (!episodes || typeof episodes !== "object") { console.error("SP: season no episodes"); return []; }
+
+    var epNum = parseInt(episode, 10);
+    if (isNaN(epNum)) { console.error("SP: season bad ep num"); return []; }
+
+    var results = [];
+    for (var key in episodes) {
+      var item = episodes[key];
+      if (!item || !item.episode || !item.downloads) continue;
+
+      var itemEp = parseInt(item.episode, 10);
+      if (isNaN(itemEp)) continue;
+      if (itemEp !== epNum) continue;
+
+      for (var di = 0; di < item.downloads.length; di++) {
+        var dl = item.downloads[di];
+        if (!dl.magnet) continue;
+
+        var infoHash = null;
+        var xtMatch = dl.magnet.match(/xt=urn:btih:([A-Za-z0-9-]+)/);
+        if (xtMatch) {
+          var raw = xtMatch[1].toUpperCase();
+          if (raw.length === 40) {
+            infoHash = raw;
+          } else if (raw.length === 32) {
+            infoHash = base32ToHex(raw);
+          }
+        }
+
+        results.push({
+          title: item.show + " - " + item.episode + " (" + dl.res + "p)",
+          name: item.show + " - " + item.episode,
+          url: dl.magnet,
+          infoHash: infoHash,
+          quality: dl.res + "p",
+          size: null,
+          provider: "SubsPlease",
+          type: "tv"
+        });
+      }
+    }
+
+    results.sort(function(a, b) {
+      var qa = parseInt(a.quality, 10) || 0;
+      var qb = parseInt(b.quality, 10) || 0;
+      return qb - qa;
+    });
+
+    console.error("SP: season results", results.length);
+    return results;
+  } catch (e) {
+    console.error("Season page scrape failed:", e.message);
     return [];
   }
 }
