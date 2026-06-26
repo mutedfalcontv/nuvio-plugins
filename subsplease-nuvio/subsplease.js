@@ -109,17 +109,27 @@ async function getKitsuTitles(tmdbId) {
 
 async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
   if (typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0) return null;
-  var url = "https://api.themoviedb.org/3/tv/" + tmdbId + "/season/" + season + "?api_key=" + TMDB_API_KEY;
   try {
-    var resp = await fetch(url);
-    var data = await resp.json();
-    if (!data || !data.episodes) return null;
-    var epIndex = parseInt(episode, 10) - 1;
-    if (epIndex < 0 || epIndex >= data.episodes.length) return null;
-    var absEp = data.episodes[epIndex].episode_number;
-    return absEp ? parseInt(absEp, 10) : null;
+    var seriesResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_API_KEY);
+    var seriesData = await seriesResp.json();
+    if (!seriesData || !seriesData.seasons) return null;
+
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    if (isNaN(seasonNum) || isNaN(epNum)) return null;
+
+    var offset = 0;
+    for (var si = 0; si < seriesData.seasons.length; si++) {
+      var s = seriesData.seasons[si];
+      var sn = parseInt(s.season_number, 10);
+      if (isNaN(sn)) continue;
+      if (sn >= seasonNum) break;
+      offset += parseInt(s.episode_count, 10) || 0;
+    }
+
+    return offset + epNum;
   } catch (e) {
-    console.error("TMDB season fetch failed:", e.message);
+    console.error("TMDB absolute ep failed:", e.message);
     return null;
   }
 }
