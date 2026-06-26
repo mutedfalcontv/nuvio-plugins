@@ -33,10 +33,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }
     console.error("SP: slugs", slugs.join(", "));
 
-    if (targetEp !== null) {
+    var rawEp = parseInt(episode, 10);
+    var mainEp = targetEp !== null ? targetEp : rawEp;
+
+    if (mainEp !== null && !isNaN(mainEp)) {
       for (var si = 0; si < slugs.length; si++) {
-        console.error("SP: try slug", slugs[si]);
-        var pageResults = await scrapeShowPage(slugs[si], targetEp);
+        console.error("SP: try slug", slugs[si], "targetEp=" + mainEp);
+        var pageResults = await scrapeShowPage(slugs[si], mainEp);
         console.error("SP: slug result", pageResults.length);
         if (pageResults.length > 0) return pageResults;
       }
@@ -63,8 +66,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
 
-    var rawEp = parseInt(episode, 10);
-    if (!isNaN(rawEp) && targetEp !== null && rawEp !== targetEp) {
+    if (!isNaN(rawEp) && (targetEp === null || rawEp !== targetEp)) {
       console.error("SP: trying main pages with raw ep", rawEp);
       for (var si = 0; si < slugs.length; si++) {
         console.error("SP: try slug raw", slugs[si], rawEp);
@@ -165,17 +167,38 @@ async function getKitsuAbsoluteEp(kitsuId, season, episode) {
     console.error("KitsuEp: looking for S" + seasonNum + " absolute=" + epNum);
     if (isNaN(seasonNum) || isNaN(epNum)) { console.error("KitsuEp: bad params"); return null; }
 
-    var epsResp = await fetch("https://kitsu.io/api/edge/anime/" + kitsuId + "/episodes?page[limit]=500");
+    var epsResp = await fetch("https://kitsu.io/api/edge/anime/" + kitsuId + "/episodes?page[limit]=20");
     var epsData = await epsResp.json();
     if (!epsData || !epsData.data) { console.error("KitsuEp: no data"); return null; }
 
     console.error("KitsuEp: total eps", epsData.data.length);
+    // Try exact seasonNumber + number match
     for (var ei = 0; ei < epsData.data.length; ei++) {
       var ep = epsData.data[ei].attributes;
       if (!ep) continue;
       if (parseInt(ep.seasonNumber, 10) === seasonNum && parseInt(ep.number, 10) === epNum) {
         console.error("KitsuEp: matched S" + ep.seasonNumber + " number=" + ep.number);
         return epNum;
+      }
+    }
+    // Fallback: season-specific Kitsu entries have seasonNumber=1 for all eps
+    // Try matching just on episode number
+    if (epsData.data.length > 0) {
+      var allSameSeason = true;
+      var firstSn = parseInt(epsData.data[0].attributes.seasonNumber, 10);
+      for (var ei = 1; ei < epsData.data.length; ei++) {
+        if (parseInt(epsData.data[ei].attributes.seasonNumber, 10) !== firstSn) {
+          allSameSeason = false; break;
+        }
+      }
+      if (allSameSeason) {
+        for (var ei = 0; ei < epsData.data.length; ei++) {
+          var ep = epsData.data[ei].attributes;
+          if (parseInt(ep.number, 10) === epNum) {
+            console.error("KitsuEp: matched by number only, ep=" + ep.number);
+            return epNum;
+          }
+        }
       }
     }
     console.error("KitsuEp: no match among", epsData.data.length, "eps");
