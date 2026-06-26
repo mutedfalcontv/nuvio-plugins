@@ -4,11 +4,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     var isKitsu = typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0;
 
-    var [titles, absoluteEp] = await Promise.all([
-      isKitsu ? getKitsuTitles(tmdbId) : getTmdbTitles(tmdbId, mediaType),
-      isKitsu ? null : getAbsoluteEpisodeNumber(tmdbId, season, episode)
-    ]);
-
+    var titles = isKitsu ? await getKitsuTitles(tmdbId) : await getTmdbTitles(tmdbId, mediaType);
     if (!titles || titles.length === 0) return [];
 
     var slugs = [];
@@ -21,7 +17,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     var displayTitle = titles[0];
     for (var si = 0; si < slugs.length; si++) {
-      var pageResults = await scrapeShowPage(slugs[si], displayTitle, absoluteEp);
+      var pageResults = await scrapeShowPage(slugs[si], displayTitle, season, episode);
       if (pageResults.length > 0) return pageResults;
     }
     return [];
@@ -107,34 +103,7 @@ async function getKitsuTitles(tmdbId) {
   return titles;
 }
 
-async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
-  if (typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0) return null;
-  try {
-    var seriesResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_API_KEY);
-    var seriesData = await seriesResp.json();
-    if (!seriesData || !seriesData.seasons) return null;
-
-    var seasonNum = parseInt(season, 10);
-    var epNum = parseInt(episode, 10);
-    if (isNaN(seasonNum) || isNaN(epNum)) return null;
-
-    var offset = 0;
-    for (var si = 0; si < seriesData.seasons.length; si++) {
-      var s = seriesData.seasons[si];
-      var sn = parseInt(s.season_number, 10);
-      if (isNaN(sn)) continue;
-      if (sn >= seasonNum) break;
-      offset += parseInt(s.episode_count, 10) || 0;
-    }
-
-    return offset + epNum;
-  } catch (e) {
-    console.error("TMDB absolute ep failed:", e.message);
-    return null;
-  }
-}
-
-async function scrapeShowPage(slug, showTitle, absoluteEp) {
+async function scrapeShowPage(slug, showTitle, season, episode) {
   try {
     var url = "https://subsplease.org/shows/" + slug + "/";
     var resp = await fetch(url, {
@@ -154,18 +123,15 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
     var episodes = apiData.episode;
     if (!episodes || typeof episodes !== "object") return [];
 
-    var targetEp = absoluteEp;
-    if (isNaN(targetEp)) targetEp = null;
-
     var results = [];
-    var matched = false;
     for (var key in episodes) {
       var item = episodes[key];
       if (!item || !item.episode || !item.downloads) continue;
 
+      if (item.episode.indexOf("-") !== -1) continue;
+
       var itemEp = parseInt(item.episode, 10);
-      if (targetEp !== null && (isNaN(itemEp) || itemEp !== targetEp)) continue;
-      if (!isNaN(itemEp)) matched = true;
+      if (isNaN(itemEp)) continue;
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -192,34 +158,6 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
           provider: "SubsPlease",
           type: "tv"
         });
-      }
-    }
-
-    if (results.length === 0 && targetEp !== null && !matched) {
-      for (var key in episodes) {
-        var item = episodes[key];
-        if (!item || !item.episode || !item.downloads) continue;
-        for (var di = 0; di < item.downloads.length; di++) {
-          var dl = item.downloads[di];
-          if (!dl.magnet) continue;
-          var infoHash = null;
-          var xtMatch = dl.magnet.match(/xt=urn:btih:([A-Za-z0-9-]+)/);
-          if (xtMatch) {
-            var raw = xtMatch[1].toUpperCase();
-            if (raw.length === 40) infoHash = raw;
-            else if (raw.length === 32) infoHash = base32ToHex(raw);
-          }
-          results.push({
-            title: item.show + " - " + item.episode + " (" + dl.res + "p)",
-            name: item.show + " - " + item.episode,
-            url: dl.magnet,
-            infoHash: infoHash,
-            quality: dl.res + "p",
-            size: null,
-            provider: "SubsPlease",
-            type: "tv"
-          });
-        }
       }
     }
 
