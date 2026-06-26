@@ -2,16 +2,24 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   try {
     if (mediaType !== "tv") return [];
 
-    var [title, absoluteEp] = await Promise.all([
-      getTmdbTitle(tmdbId, mediaType),
+    var [titles, absoluteEp] = await Promise.all([
+      getTmdbTitles(tmdbId, mediaType),
       getAbsoluteEpisodeNumber(tmdbId, season, episode)
     ]);
 
-    if (!title) return [];
+    if (!titles || titles.length === 0) return [];
 
-    var slugs = generateSlugs(title);
+    var slugs = [];
+    for (var ti = 0; ti < titles.length; ti++) {
+      var tSlugs = generateSlugs(titles[ti]);
+      for (var si = 0; si < tSlugs.length; si++) {
+        if (slugs.indexOf(tSlugs[si]) === -1) slugs.push(tSlugs[si]);
+      }
+    }
+
+    var displayTitle = titles[0];
     for (var si = 0; si < slugs.length; si++) {
-      var pageResults = await scrapeShowPage(slugs[si], title, absoluteEp);
+      var pageResults = await scrapeShowPage(slugs[si], displayTitle, absoluteEp);
       if (pageResults.length > 0) return pageResults;
     }
     return [];
@@ -21,16 +29,21 @@ async function getStreams(tmdbId, mediaType, season, episode) {
   }
 }
 
-async function getTmdbTitle(tmdbId, mediaType) {
+async function getTmdbTitles(tmdbId, mediaType) {
+  var titles = [];
   var url = "https://api.themoviedb.org/3/" + mediaType + "/" + tmdbId + "?api_key=" + TMDB_API_KEY;
   try {
     var resp = await fetch(url);
     var data = await resp.json();
-    return data.title || data.name || null;
+    if (!data) return titles;
+
+    if (data.title) titles.push(data.title);
+    if (data.name && titles.indexOf(data.name) === -1) titles.push(data.name);
+    if (data.original_name && titles.indexOf(data.original_name) === -1) titles.push(data.original_name);
   } catch (e) {
     console.error("TMDB fetch failed:", e.message);
-    return null;
   }
+  return titles;
 }
 
 async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
