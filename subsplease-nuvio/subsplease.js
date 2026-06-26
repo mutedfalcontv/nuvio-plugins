@@ -1,17 +1,29 @@
 async function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    console.error("SubsPlease start:", tmdbId, mediaType, "S" + season + "E" + episode);
-    if (mediaType !== "tv" && mediaType !== "series" && mediaType !== "anime") return [];
+    console.error("SP start:", tmdbId, mediaType, season, episode);
+    if (mediaType !== "tv" && mediaType !== "series" && mediaType !== "anime") { console.error("SP: bad type"); return []; }
 
     var tmdbType = mediaType === "anime" ? "tv" : mediaType;
     var isKitsu = typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0;
 
-    var absoluteEp = isKitsu ? null : await getAbsoluteEpisodeNumber(tmdbId, season, episode);
-    console.error("absoluteEp:", absoluteEp);
+    var titles;
+    var targetEp = null;
 
-    var titles = isKitsu ? await getKitsuTitles(tmdbId) : await getTmdbTitles(tmdbId, tmdbType);
-    console.error("titles:", titles ? titles.join(", ") : "none");
-    if (!titles || titles.length === 0) return [];
+    if (isKitsu) {
+      console.error("SP: kitsu path");
+      var kitsuId = tmdbId.split(":")[1];
+      titles = await getKitsuTitles(tmdbId);
+      targetEp = await getKitsuAbsoluteEp(kitsuId, season, episode);
+    } else {
+      console.error("SP: tmdb path");
+      titles = await getTmdbTitles(tmdbId, tmdbType);
+      targetEp = await getTmdbAbsoluteEp(tmdbId, season, episode);
+    }
+
+    console.error("SP: titles", titles ? titles.join(", ") : "none");
+    console.error("SP: targetEp", targetEp);
+    if (!titles || titles.length === 0) { console.error("SP: no titles"); return []; }
+    if (targetEp === null) { console.error("SP: no targetEp"); return []; }
 
     var slugs = [];
     for (var ti = 0; ti < titles.length; ti++) {
@@ -20,18 +32,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         if (slugs.indexOf(tSlugs[si]) === -1) slugs.push(tSlugs[si]);
       }
     }
-    console.error("slugs:", slugs.join(", "));
+    console.error("SP: slugs", slugs.join(", "));
 
-    var displayTitle = titles[0];
     for (var si = 0; si < slugs.length; si++) {
-      console.error("trying slug:", slugs[si]);
-      var pageResults = await scrapeShowPage(slugs[si], displayTitle, absoluteEp);
-      console.error("slug result count:", pageResults.length);
+      console.error("SP: try slug", slugs[si]);
+      var pageResults = await scrapeShowPage(slugs[si], targetEp);
+      console.error("SP: slug result", pageResults.length);
       if (pageResults.length > 0) return pageResults;
     }
+    console.error("SP: no match");
     return [];
   } catch (e) {
-    console.error("SubsPlease error:", e.message);
+    console.error("SP error:", e.message);
     return [];
   }
 }
@@ -112,15 +124,44 @@ async function getKitsuTitles(tmdbId) {
   return titles;
 }
 
-async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
+async function getKitsuAbsoluteEp(kitsuId, season, episode) {
   try {
-    var seriesResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_API_KEY);
-    var seriesData = await seriesResp.json();
-    if (!seriesData || !seriesData.seasons) return null;
-
     var seasonNum = parseInt(season, 10);
     var epNum = parseInt(episode, 10);
-    if (isNaN(seasonNum) || isNaN(epNum)) return null;
+    console.error("KitsuEp: looking for S" + seasonNum + " absolute=" + epNum);
+    if (isNaN(seasonNum) || isNaN(epNum)) { console.error("KitsuEp: bad params"); return null; }
+
+    var epsResp = await fetch("https://kitsu.io/api/edge/anime/" + kitsuId + "/episodes?page[limit]=500");
+    var epsData = await epsResp.json();
+    if (!epsData || !epsData.data) { console.error("KitsuEp: no data"); return null; }
+
+    console.error("KitsuEp: total eps", epsData.data.length);
+    for (var ei = 0; ei < epsData.data.length; ei++) {
+      var ep = epsData.data[ei].attributes;
+      if (!ep) continue;
+      if (parseInt(ep.seasonNumber, 10) === seasonNum && parseInt(ep.number, 10) === epNum) {
+        console.error("KitsuEp: matched S" + ep.seasonNumber + " number=" + ep.number);
+        return epNum;
+      }
+    }
+    console.error("KitsuEp: no match among", epsData.data.length, "eps");
+    return null;
+  } catch (e) {
+    console.error("Kitsu ep lookup failed:", e.message);
+    return null;
+  }
+}
+
+async function getTmdbAbsoluteEp(tmdbId, season, episode) {
+  try {
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    console.error("TMDBEp: looking for S" + seasonNum + "E" + epNum);
+    if (isNaN(seasonNum) || isNaN(epNum)) { console.error("TMDBEp: bad params"); return null; }
+
+    var seriesResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_API_KEY);
+    var seriesData = await seriesResp.json();
+    if (!seriesData || !seriesData.seasons) { console.error("TMDBEp: no seasons"); return null; }
 
     var offset = 0;
     for (var si = 0; si < seriesData.seasons.length; si++) {
@@ -131,14 +172,16 @@ async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
       offset += parseInt(s.episode_count, 10) || 0;
     }
 
-    return offset + epNum;
+    var result = offset + epNum;
+    console.error("TMDBEp: offset=" + offset + " total=" + result);
+    return result;
   } catch (e) {
-    console.error("Absolute ep failed:", e.message);
+    console.error("TMDB absolute ep failed:", e.message);
     return null;
   }
 }
 
-async function scrapeShowPage(slug, showTitle, absoluteEp) {
+async function scrapeShowPage(slug, targetEp) {
   try {
     var url = "https://subsplease.org/shows/" + slug + "/";
     var resp = await fetch(url, {
@@ -158,8 +201,7 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
     var episodes = apiData.episode;
     if (!episodes || typeof episodes !== "object") return [];
 
-    var exactResults = [];
-    var allResults = [];
+    var results = [];
     for (var key in episodes) {
       var item = episodes[key];
       if (!item || !item.episode || !item.downloads) continue;
@@ -168,6 +210,7 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
 
       var itemEp = parseInt(item.episode, 10);
       if (isNaN(itemEp)) continue;
+      if (itemEp !== targetEp) continue;
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -184,7 +227,7 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
           }
         }
 
-        var entry = {
+        results.push({
           title: item.show + " - " + item.episode + " (" + dl.res + "p)",
           name: item.show + " - " + item.episode,
           url: dl.magnet,
@@ -193,17 +236,9 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
           size: null,
           provider: "SubsPlease",
           type: "tv"
-        };
-
-        allResults.push(entry);
-
-        if (absoluteEp !== null && itemEp === absoluteEp) {
-          exactResults.push(entry);
-        }
+        });
       }
     }
-
-    var results = (exactResults.length > 0) ? exactResults : allResults;
 
     results.sort(function(a, b) {
       var qa = parseInt(a.quality, 10) || 0;
