@@ -4,6 +4,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     var isKitsu = typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0;
 
+    var absoluteEp = isKitsu ? null : await getAbsoluteEpisodeNumber(tmdbId, season, episode);
+
     var titles = isKitsu ? await getKitsuTitles(tmdbId) : await getTmdbTitles(tmdbId, mediaType);
     if (!titles || titles.length === 0) return [];
 
@@ -17,7 +19,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     var displayTitle = titles[0];
     for (var si = 0; si < slugs.length; si++) {
-      var pageResults = await scrapeShowPage(slugs[si], displayTitle, season, episode);
+      var pageResults = await scrapeShowPage(slugs[si], displayTitle, absoluteEp);
       if (pageResults.length > 0) return pageResults;
     }
     return [];
@@ -103,7 +105,33 @@ async function getKitsuTitles(tmdbId) {
   return titles;
 }
 
-async function scrapeShowPage(slug, showTitle, season, episode) {
+async function getAbsoluteEpisodeNumber(tmdbId, season, episode) {
+  try {
+    var seriesResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_API_KEY);
+    var seriesData = await seriesResp.json();
+    if (!seriesData || !seriesData.seasons) return null;
+
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    if (isNaN(seasonNum) || isNaN(epNum)) return null;
+
+    var offset = 0;
+    for (var si = 0; si < seriesData.seasons.length; si++) {
+      var s = seriesData.seasons[si];
+      var sn = parseInt(s.season_number, 10);
+      if (isNaN(sn) || sn <= 0) continue;
+      if (sn >= seasonNum) break;
+      offset += parseInt(s.episode_count, 10) || 0;
+    }
+
+    return offset + epNum;
+  } catch (e) {
+    console.error("Absolute ep failed:", e.message);
+    return null;
+  }
+}
+
+async function scrapeShowPage(slug, showTitle, absoluteEp) {
   try {
     var url = "https://subsplease.org/shows/" + slug + "/";
     var resp = await fetch(url, {
@@ -132,6 +160,7 @@ async function scrapeShowPage(slug, showTitle, season, episode) {
 
       var itemEp = parseInt(item.episode, 10);
       if (isNaN(itemEp)) continue;
+      if (absoluteEp !== null && itemEp !== absoluteEp) continue;
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
