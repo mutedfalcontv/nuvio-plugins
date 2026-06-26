@@ -100,7 +100,20 @@ async function getTitles(tmdbId) {
     if (!data) return titles;
 
     if (data.name) titles.push(data.name);
-    if (data.original_name && data.original_name !== data.name) titles.push(data.original_name);
+
+    var origName = data.original_name || data.original_title;
+    if (origName && origName !== data.name) {
+      var isAscii = true;
+      for (var ci = 0; ci < origName.length; ci++) {
+        if (origName.charCodeAt(ci) > 127) { isAscii = false; break; }
+      }
+      if (isAscii) {
+        if (titles.indexOf(origName) === -1) titles.push(origName);
+      } else {
+        var romaji = await getRomajiTitle(tmdbId);
+        if (romaji && titles.indexOf(romaji) === -1) titles.push(romaji);
+      }
+    }
 
     var altResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "/alternative_titles?api_key=" + TMDB_API_KEY);
     var altData = await altResp.json();
@@ -116,6 +129,32 @@ async function getTitles(tmdbId) {
     console.error("TMDB title fetch failed:", e.message);
   }
   return titles;
+}
+
+async function getRomajiTitle(tmdbId) {
+  try {
+    var url = "https://api.themoviedb.org/3/tv/" + tmdbId + "/translations?api_key=" + TMDB_API_KEY;
+    var resp = await fetch(url);
+    var data = await resp.json();
+    if (!data || !data.translations) return null;
+    var prefer = { id: "ID", tr: "TR", ca: "ES" };
+    for (var key in prefer) {
+      for (var ti = 0; ti < data.translations.length; ti++) {
+        var t = data.translations[ti];
+        if (t.iso_3166_1 === prefer[key] && t.data && t.data.name) {
+          var romaji = t.data.name;
+          var allAscii = true;
+          for (var ci = 0; ci < romaji.length; ci++) {
+            if (romaji.charCodeAt(ci) > 127) { allAscii = false; break; }
+          }
+          if (allAscii) return romaji;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Romaji fetch failed:", e.message);
+  }
+  return null;
 }
 
 async function getKitsuTitles(tmdbId) {
