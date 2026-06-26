@@ -151,7 +151,8 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
     var episodes = apiData.episode;
     if (!episodes || typeof episodes !== "object") return [];
 
-    var results = [];
+    var exactResults = [];
+    var allResults = [];
     for (var key in episodes) {
       var item = episodes[key];
       if (!item || !item.episode || !item.downloads) continue;
@@ -160,7 +161,6 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
 
       var itemEp = parseInt(item.episode, 10);
       if (isNaN(itemEp)) continue;
-      if (absoluteEp !== null && itemEp !== absoluteEp) continue;
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -177,7 +177,7 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
           }
         }
 
-        results.push({
+        var entry = {
           title: item.show + " - " + item.episode + " (" + dl.res + "p)",
           name: item.show + " - " + item.episode,
           url: dl.magnet,
@@ -186,9 +186,17 @@ async function scrapeShowPage(slug, showTitle, absoluteEp) {
           size: null,
           provider: "SubsPlease",
           type: "tv"
-        });
+        };
+
+        allResults.push(entry);
+
+        if (absoluteEp !== null && itemEp === absoluteEp) {
+          exactResults.push(entry);
+        }
       }
     }
+
+    var results = (exactResults.length > 0) ? exactResults : allResults;
 
     results.sort(function(a, b) {
       var qa = parseInt(a.quality, 10) || 0;
