@@ -23,7 +23,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     console.error("SP: titles", titles ? titles.join(", ") : "none");
     console.error("SP: targetEp", targetEp);
     if (!titles || titles.length === 0) { console.error("SP: no titles"); return []; }
-    if (targetEp === null) { console.error("SP: no targetEp"); return []; }
 
     var slugs = [];
     for (var ti = 0; ti < titles.length; ti++) {
@@ -34,11 +33,13 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     }
     console.error("SP: slugs", slugs.join(", "));
 
-    for (var si = 0; si < slugs.length; si++) {
-      console.error("SP: try slug", slugs[si]);
-      var pageResults = await scrapeShowPage(slugs[si], targetEp);
-      console.error("SP: slug result", pageResults.length);
-      if (pageResults.length > 0) return pageResults;
+    if (targetEp !== null) {
+      for (var si = 0; si < slugs.length; si++) {
+        console.error("SP: try slug", slugs[si]);
+        var pageResults = await scrapeShowPage(slugs[si], targetEp);
+        console.error("SP: slug result", pageResults.length);
+        if (pageResults.length > 0) return pageResults;
+      }
     }
 
     var seasonNum = parseInt(season, 10);
