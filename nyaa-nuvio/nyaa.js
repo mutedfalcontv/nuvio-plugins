@@ -36,9 +36,10 @@ var TRUSTED_PATTERN = /\b(trusted|v2|remaster)\b/i;
 
 async function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    if (mediaType !== "tv") return [];
+    if (mediaType !== "tv" && mediaType !== "series") return [];
 
-    var titles = await getTitles(tmdbId);
+    var titles = typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0
+      ? await getKitsuTitles(tmdbId) : await getTitles(tmdbId);
     if (!titles || titles.length === 0) return [];
 
     var seen = {};
@@ -113,6 +114,26 @@ async function getTitles(tmdbId) {
     }
   } catch (e) {
     console.error("TMDB title fetch failed:", e.message);
+  }
+  return titles;
+}
+
+async function getKitsuTitles(tmdbId) {
+  var titles = [];
+  var kitsuId = tmdbId.split(":")[1];
+  var url = "https://kitsu.io/api/edge/anime/" + kitsuId;
+  try {
+    var resp = await fetch(url);
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.attributes) return titles;
+    var attrs = data.data.attributes;
+    if (attrs.titles) {
+      if (attrs.titles.en_jp) titles.push(attrs.titles.en_jp);
+      if (attrs.titles.en && titles.indexOf(attrs.titles.en) === -1) titles.push(attrs.titles.en);
+    }
+    if (attrs.canonicalTitle && titles.indexOf(attrs.canonicalTitle) === -1) titles.push(attrs.canonicalTitle);
+  } catch (e) {
+    console.error("Kitsu fetch failed:", e.message);
   }
   return titles;
 }
