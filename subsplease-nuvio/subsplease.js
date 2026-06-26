@@ -52,6 +52,26 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         console.error("SP: season slug result", sResults.length);
         if (sResults.length > 0) return sResults;
       }
+      // Try without 's' prefix (handles rare -{N} pattern like bukiyou-na-senpai-2)
+      console.error("SP: trying bare-number season pages for S" + seasonNum);
+      for (var si = 0; si < slugs.length; si++) {
+        var nSlug = slugs[si] + "-" + seasonNum;
+        console.error("SP: try bare season slug", nSlug);
+        var nResults = await scrapeSeasonPage(nSlug, episode);
+        console.error("SP: bare season slug result", nResults.length);
+        if (nResults.length > 0) return nResults;
+      }
+    }
+
+    var rawEp = parseInt(episode, 10);
+    if (!isNaN(rawEp) && targetEp !== null && rawEp !== targetEp) {
+      console.error("SP: trying main pages with raw ep", rawEp);
+      for (var si = 0; si < slugs.length; si++) {
+        console.error("SP: try slug raw", slugs[si], rawEp);
+        var rawResults = await scrapeShowPage(slugs[si], rawEp);
+        console.error("SP: raw slug result", rawResults.length);
+        if (rawResults.length > 0) return rawResults;
+      }
     }
 
     console.error("SP: no match");
@@ -220,11 +240,13 @@ async function scrapeShowPage(slug, targetEp) {
       var item = episodes[key];
       if (!item || !item.episode || !item.downloads) continue;
 
-      if (item.episode.indexOf("-") !== -1) continue;
-
-      var itemEp = parseInt(item.episode, 10);
-      if (isNaN(itemEp)) continue;
-      if (itemEp !== targetEp) continue;
+      // Skip non-integer episodes (65.5, 66v2, etc.)
+      var epStr = item.episode;
+      if (epStr.indexOf("-") !== -1) continue;
+      var epInt = parseInt(epStr, 10);
+      if (isNaN(epInt)) continue;
+      if (String(epInt) !== epStr) continue;
+      if (epInt !== targetEp) continue;
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -362,6 +384,12 @@ function generateSlugs(title) {
   var base = title.toLowerCase();
   var slugs = [];
 
+  // Also generate a version with apostrophes removed (it's → its)
+  var baseNoApos = base.replace(/'/g, "");
+  if (baseNoApos !== base) {
+    slugs.push(baseNoApos.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
+  }
+
   slugs.push(base.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
 
   var parenless = base.replace(/\([^)]*\)/g, "").trim();
@@ -371,10 +399,12 @@ function generateSlugs(title) {
 
   var beforeColon = base.split(":")[0].trim();
   if (beforeColon !== base) {
-    slugs.push(beforeColon.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
+    var bcSlug = beforeColon.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    if (bcSlug.length >= 4) slugs.push(bcSlug);
     var beforeColonParenless = beforeColon.replace(/\([^)]*\)/g, "").trim();
     if (beforeColonParenless !== beforeColon) {
-      slugs.push(beforeColonParenless.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
+      var bcpSlug = beforeColonParenless.replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+      if (bcpSlug.length >= 4) slugs.push(bcpSlug);
     }
   }
 
@@ -384,11 +414,24 @@ function generateSlugs(title) {
     slugs.push(words.slice(0, 3).join("-"));
   }
 
+  // Add underscore variants for first hyphen (handles slugs like d_cide-traumerei)
+  var extra = [];
+  for (var si = 0; si < slugs.length; si++) {
+    var underPos = slugs[si].indexOf("-");
+    if (underPos > 0) {
+      var underV = slugs[si].substring(0, underPos) + "_" + slugs[si].substring(underPos + 1);
+      if (slugs.indexOf(underV) === -1 && extra.indexOf(underV) === -1) extra.push(underV);
+    }
+  }
+
   var deduped = [];
   for (var si = 0; si < slugs.length; si++) {
     if (deduped.indexOf(slugs[si]) === -1) {
       deduped.push(slugs[si]);
     }
+  }
+  for (var si = 0; si < extra.length; si++) {
+    deduped.push(extra[si]);
   }
   return deduped;
 }
