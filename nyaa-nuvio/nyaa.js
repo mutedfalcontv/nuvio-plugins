@@ -283,13 +283,25 @@ function extractNsTag(block, tagName) {
   return m ? m[1].trim() : "";
 }
 
+function cleanTorrentTitle(title) {
+  var cleaned = title;
+  cleaned = cleaned.replace(/\[([^\]]*)\]/g, "$1 ");
+  cleaned = cleaned.replace(/\([^\)]*\)/g, " ");
+  cleaned = cleaned.replace(/\b(4K|2160p|1080p|720p|480p|360p)\b/gi, " ");
+  cleaned = cleaned.replace(/\.(mkv|mp4|avi|m2ts|ts|mov|wmv)$/i, " ");
+  cleaned = cleaned.replace(/\b(x264|x265|hevc|h264|h265|av1|web[-\s]?dl|hdtv|bluray|bdrip|webrip)\b/gi, " ");
+  cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
+  return cleaned;
+}
+
 function matchEpisode(title, requestedSeason, requestedEpisode) {
   var reqEp = parseInt(requestedEpisode, 10);
   var reqSeason = parseInt(requestedSeason, 10);
-
   if (isNaN(reqEp)) return false;
 
-  var rangeMatch = title.match(RANGE_PATTERN);
+  var cleaned = cleanTorrentTitle(title);
+
+  var rangeMatch = cleaned.match(RANGE_PATTERN);
   if (rangeMatch) {
     var rangeSeason = parseInt(rangeMatch[1], 10);
     var rangeStart = parseInt(rangeMatch[2], 10);
@@ -301,32 +313,38 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
 
   for (var pi = 0; pi < EPISODE_PATTERNS.length; pi++) {
     var pat = EPISODE_PATTERNS[pi];
-    var m = title.match(pat.re);
+    var m = cleaned.match(pat.re);
     if (!m) continue;
-
     if (pat.seasonGroup !== null) {
       var foundSeason = parseInt(m[pat.seasonGroup], 10);
       if (foundSeason !== reqSeason) continue;
     }
-
     var foundEp = parseInt(m[pat.epGroup], 10);
     if (foundEp === reqEp) return true;
   }
 
-  var dashMatch = title.match(DASH_EP_PATTERN);
+  var dashMatch = cleaned.match(DASH_EP_PATTERN);
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
-    var knownSeasonInTitle = /\bS(\d+)\b/i.test(title);
+    var knownSeasonInTitle = /\bS(\d+)\b/i.test(cleaned);
     if (!knownSeasonInTitle && dashEp === reqEp) {
       return true;
     }
   }
 
-  var isBatch = BATCH_PATTERN.test(title);
+  if (reqSeason === 1 || !/\bS(\d+)\b/i.test(cleaned)) {
+    var trailingEp = cleaned.match(/\b(\d{2,3})\s*$/);
+    if (trailingEp) {
+      var num = parseInt(trailingEp[1], 10);
+      if (num === reqEp) return true;
+    }
+  }
+
+  var isBatch = BATCH_PATTERN.test(cleaned);
   if (isBatch) {
-    var batchSeasonMatch = title.match(/\bSeason\s+(\d+)\b/i);
+    var batchSeasonMatch = cleaned.match(/\bSeason\s+(\d+)\b/i);
     if (!batchSeasonMatch) {
-      batchSeasonMatch = title.match(/S(\d+)/i);
+      batchSeasonMatch = cleaned.match(/S(\d+)/i);
     }
     if (batchSeasonMatch) {
       var batchSeason = parseInt(batchSeasonMatch[1], 10);
