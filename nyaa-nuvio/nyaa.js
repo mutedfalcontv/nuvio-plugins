@@ -19,6 +19,7 @@ var NYAA_CATEGORIES = {
 var EPISODE_PATTERNS = [
   { re: /S(\d+)\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /S(\d+)\s*\.\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
+  { re: /S(\d+)\s*[-–]\s*(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 },
   { re: /Season\s+(\d+)\s+Episode\s+(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /(\d+)x(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /\[(\d+)\]$/i, seasonGroup: null, epGroup: 1 },
