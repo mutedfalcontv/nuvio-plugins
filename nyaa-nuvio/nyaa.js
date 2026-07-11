@@ -290,6 +290,7 @@ function cleanTorrentTitle(title) {
   cleaned = cleaned.replace(/\b(4K|2160p|1080p|720p|480p|360p)\b/gi, " ");
   cleaned = cleaned.replace(/\.(mkv|mp4|avi|m2ts|ts|mov|wmv)$/i, " ");
   cleaned = cleaned.replace(/\b(x264|x265|hevc|h264|h265|av1|web[-\s]?dl|hdtv|bluray|bdrip|webrip)\b/gi, " ");
+  cleaned = cleaned.replace(/(?<=[a-zA-Z0-9])\.(?=[a-zA-Z0-9])/gi, " ");
   cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
   return cleaned;
 }
@@ -327,16 +328,20 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
     var knownSeasonInTitle = /\bS(\d+)\b/i.test(cleaned);
-    if (!knownSeasonInTitle && dashEp === reqEp) {
+    if (!knownSeasonInTitle && reqSeason === 1 && dashEp === reqEp) {
       return true;
     }
   }
 
-  if (reqSeason === 1 || !/\bS(\d+)\b/i.test(cleaned)) {
-    var trailingEp = cleaned.match(/\b(\d{2,3})\s*$/);
-    if (trailingEp) {
-      var num = parseInt(trailingEp[1], 10);
-      if (num === reqEp) return true;
+  // Rakun post-processor: trailing number as episode (when no season in title)
+  if (!/\bS(\d+)\b/i.test(cleaned)) {
+    // No season marker in title -- only match if requesting season 1
+    if (reqSeason === 1) {
+      var trailingEp = cleaned.match(/\b(\d{2,4})\s*$/);
+      if (trailingEp) {
+        var num = parseInt(trailingEp[1], 10);
+        if (num === reqEp) return true;
+      }
     }
   }
 
