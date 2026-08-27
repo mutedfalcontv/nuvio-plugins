@@ -424,6 +424,12 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
 
   var cleaned = cleanTorrentTitle(title);
 
+  // A batch/complete/season-pack is the whole season, not a single requested
+  // episode. Returning it would make Nuvio open the wrong file. This also kills
+  // the false-positive where a *sequel* sharing the name prefix (e.g.
+  // "Code Geass: Dakkan no Roze - 01 ~ 12 [BATCH]") matches a S1E1 request.
+  if (BATCH_PATTERN.test(cleaned)) return false;
+
   var rangeMatch = cleaned.match(RANGE_PATTERN);
   if (rangeMatch) {
     var rangeSeason = parseInt(rangeMatch[1], 10);
@@ -449,8 +455,12 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
   var dashMatch = cleaned.match(DASH_EP_PATTERN);
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
-    var knownSeasonInTitle = /\bS(\d+)\b/i.test(cleaned);
-    if (!knownSeasonInTitle && reqSeason === 1 && dashEp === reqEp) {
+    var seasonInTitle = cleaned.match(/\bS(\d+)\b/i);
+    if (seasonInTitle) {
+      // "Show S2 - 08" style: honor the season token.
+      if (parseInt(seasonInTitle[1], 10) === reqSeason && dashEp === reqEp) return true;
+    } else if (reqSeason === 1 && dashEp === reqEp) {
+      // Absolute "- 08" with no season token (SubsPlease S1).
       return true;
     }
   }
