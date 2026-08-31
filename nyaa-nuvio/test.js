@@ -88,6 +88,20 @@ function runOffline() {
   assert("match S1 absolute '- 08' still works", ctx.matchEpisode("Show - 08 (1080p)", 1, 8) === true);
   assert("reject S2 dash when season mismatch", ctx.matchEpisode("Show S1 - 08 (1080p)", 2, 8) === false);
 
+  // ---- anti-false-positive: season spelled out must not match a different season ----
+  assert("reject 'Season 2 - 08' for S1E8 (spelled-out season)", ctx.matchEpisode("Solo Leveling Season 2 -Arise from the Shadow- - 08 [1080p]", 1, 8) === false);
+  assert("reject 'S2 - 08' for S1E8 even when abs=8", ctx.matchEpisode("[Raze] Solo Leveling S2 - 08 x265 1080p", 1, 8, 8) === false);
+  assert("accept cross-season absolute '- 25' for S2E13 (abs=25)", ctx.matchEpisode("[SubsPlease] Solo Leveling - 25 (1080p)", 2, 13, 25) === true);
+  assert("reject cross-season absolute '- 25' when no abs known", ctx.matchEpisode("[SubsPlease] Solo Leveling - 25 (1080p)", 2, 13, null) === false);
+  assert("mid-chain bracket ep [08] matches S1E8", ctx.matchEpisode("[北宇治字幕组] 再见，菈菈 / Sayonara Lara [08][WebRip][HEVC_AAC][简日内嵌]", 1, 8, null) === true);
+  assert("mid-chain bracket ep [08] rejects wrong ep", ctx.matchEpisode("[北宇治字幕组] 再见，菈菈 / Sayonara Lara [08][WebRip][HEVC_AAC][简日内嵌]", 1, 9, null) === false);
+  assert("mid-chain [05][1080p] keeps ep 5", ctx.matchEpisode("Show [05][1080p][HEVC] release", 1, 5, null) === true);
+  assert("H.264 trailer must not fake S1E264", ctx.matchEpisode("[ToonsHub] Grand Blue Dreaming S03E09 1080p AMZN WEB-DL DDP2.0 H.264 (Multi-Subs)", 1, 264, null) === false);
+  assert("H.264 trailer still matches real S3E09", ctx.matchEpisode("[ToonsHub] Grand Blue Dreaming S03E09 1080p AMZN WEB-DL DDP2.0 H.264 (Multi-Subs)", 3, 9, null) === true);
+  assert("EP239 absolute binds to S1 only", ctx.matchEpisode("[Shridhuu][1080p] Swallowed Star - Tunshi Xingkong - EP239", 1, 239, null) === true);
+  assert("EP239 must not match S2E239", ctx.matchEpisode("[Shridhuu][1080p] Swallowed Star - Tunshi Xingkong - EP239", 2, 239, null) === false);
+
+
   // ---- unit: parseRssItems + parseSize ----
   const items = ctx.parseRssItems(SUBSPLEASE_RSS);
   assert("parseRssItems 1 item", items.length === 1);

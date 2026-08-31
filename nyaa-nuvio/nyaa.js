@@ -44,6 +44,12 @@ var BATCH_PATTERN = /\b(batch|complete|season\s+\d+\s+pack)\b/i;
 var RANGE_PATTERN = /S(\d+)\s*E(\d+)\s*[-–]\s*E?(\d+)/i;
 var RES_PATTERN = /\b(4K|2160p|1080p|720p|480p|360p)\b/i;
 var TRUSTED_PATTERN = /\b(trusted|v2|remaster)\b/i;
+// Any explicit season marker ("S2", "S03E09", "S02", "Season 3"). Deliberately
+// uses NO trailing \b after the digits: "S03E09" has no word boundary between
+// "03" and "E", but it still declares a season. When a title carries a season
+// token, a bare trailing number (e.g. H.264's "264") must never be treated as a
+// season-1 absolute episode.
+var SEASON_TOKEN_PATTERN = /\bS\s*(\d+)|Season\s+(\d+)/i;
 
 // ---- Network helpers (ported from nuvio-torlink-addon, Hermes-safe) ----
 
@@ -122,14 +128,16 @@ function parseSize(s) {
 
 // Nyaa ANDs space-separated terms. Fansub releases (SubsPlease/Erai) use an
 // absolute "- 08" with NO season token, so a "S01" suffix excludes them.
-// Build multiple candidates per title and try them all.
-function buildQueries(title, season, episode) {
+// Build multiple candidates per title and try them all. `absolute` is TMDB's
+// absolute episode number (cross-season shows like Bookworm need it).
+function buildQueries(title, season, episode, absolute) {
   var out = [];
   var ep = parseInt(episode, 10);
   var s = parseInt(season, 10);
 
-  if (!isNaN(ep)) out.push(title + " " + ep);                              // anime/absolute: "Futari 08"
+  if (!isNaN(ep)) out.push(title + " " + ep);                              // anime/absolute: "Futari 8"
   if (!isNaN(s) && !isNaN(ep)) out.push(title + " S" + padZero(s, 2) + "E" + padZero(ep, 2)); // TV: "Show S01E08"
+  if (absolute != null && !isNaN(absolute)) out.push(title + " " + absolute); // cross-season absolute: "Bookworm 15"
   out.push(title);                                                        // bare fallback
 
   // de-dup while preserving order
@@ -150,17 +158,52 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       : await getTitles(tmdbId);
     if (!titles || titles.length === 0) return [];
 
+    // TMDB absolute episode number (cross-season numbering). null for kitsu.
+    var abs = (typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0)
+      ? null
+      : await getAbsoluteEpisode(tmdbId, season, episode);
+
+    // Dedupe titles and drop non-Latin-script ones (Chinese/Korean/Japanese
+    // kanji rarely appear in anime torrent names) — they only burn Nyaa
+    // requests. Then bound how many distinct titles we'll try.
+    var seenTitle = {};
+    var usableTitles = [];
+    for (var tt = 0; tt < titles.length && usableTitles.length < 6; tt++) {
+      var t2 = titles[tt];
+      if (!t2 || seenTitle[t2]) continue;
+      seenTitle[t2] = true;
+      var latin = 0, total = 0;
+      for (var cc = 0; cc < t2.length; cc++) {
+        var code = t2.charCodeAt(cc);
+        if ((code >= 0x20 && code <= 0x7e) || (code >= 0x00c0 && code <= 0x024f)) latin++; // ASCII + Latin-1/Extended
+        total++;
+      }
+      if (total === 0) continue;
+      // Keep titles that are at least ~40% Latin-script.
+      if (latin / total < 0.4) continue;
+      usableTitles.push(t2);
+    }
+    if (usableTitles.length === 0) usableTitles = titles.slice(0, 6);
+
     var seen = {};
     var results = [];
 
-    // Try every title, and for each title every candidate query. Do NOT break
-    // on the first hit — the English TMDB title returns English-dub torrents
-    // while the romaji title returns SubsPlease/Erai. Both are valid sources.
-    for (var ti = 0; ti < titles.length; ti++) {
-      var queries = buildQueries(titles[ti], season, episode);
+    // Try every usable title, and for each title every candidate query. Do NOT
+    // break on the first hit — the English TMDB title returns English-dub
+    // torrents while the romaji title returns SubsPlease/Erai. Both are valid
+    // sources. Enforce a total Nyaa-request budget (each RSS call, especially
+    // a failing one behind a 15s timeout + retry, can cost seconds).
+    var MAX_NYAA_REQUESTS = 20;
+    var requestsMade = 0;
+    for (var ti = 0; ti < usableTitles.length; ti++) {
+      var queries = buildQueries(usableTitles[ti], season, episode, abs);
       for (var qi = 0; qi < queries.length; qi++) {
-        var rssItems = await searchNyaa(queries[qi], NYAA_CATEGORIES.ENGLISH);
+        var rssItems;
+        requestsMade++;
+        if (requestsMade > MAX_NYAA_REQUESTS) break;
+        rssItems = await searchNyaa(queries[qi], NYAA_CATEGORIES.ENGLISH);
         if (!rssItems || rssItems.length === 0) {
+          if (++requestsMade > MAX_NYAA_REQUESTS) break;
           rssItems = await searchNyaa(queries[qi], NYAA_CATEGORIES.ALL);
         }
         if (!rssItems) continue;
@@ -168,7 +211,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         for (var ri = 0; ri < rssItems.length; ri++) {
           var item = rssItems[ri];
           if (seen[item.infoHash]) continue;
-          var match = matchEpisode(item.title, season, episode);
+          var match = matchEpisode(item.title, season, episode, abs);
           if (!match) continue;
 
           seen[item.infoHash] = true;
@@ -189,6 +232,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           });
         }
       }
+      if (requestsMade > MAX_NYAA_REQUESTS) break;
     }
 
     results.sort(function (a, b) {
@@ -209,7 +253,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 async function getTitles(tmdbId) {
   var titles = [];
   try {
-    var resp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_KEY);
+    var resp = await fetchResilient("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_KEY, { retries: 2 });
     var data = await resp.json();
     if (!data) return titles;
 
@@ -238,7 +282,7 @@ async function getTitles(tmdbId) {
       }
     }
 
-    var altResp = await fetch("https://api.themoviedb.org/3/tv/" + tmdbId + "/alternative_titles?api_key=" + TMDB_KEY);
+    var altResp = await fetchResilient("https://api.themoviedb.org/3/tv/" + tmdbId + "/alternative_titles?api_key=" + TMDB_KEY, { retries: 2 });
     var altData = await altResp.json();
     if (altData && altData.results) {
       for (var i = 0; i < altData.results.length; i++) {
@@ -252,6 +296,34 @@ async function getTitles(tmdbId) {
     console.error("TMDB title fetch failed:", e.message);
   }
   return titles;
+}
+
+async function getAbsoluteEpisode(tmdbId, season, episode) {
+  // SubsPlease and most fansubs number multi-season anime with ONE continuous
+  // counter across seasons, with no season token: "Solo Leveling - 25" (S2E13),
+  // "Honzuki no Gekokujou - 36" (S1E36). TMDB's `absolute_number` is often
+  // missing for anime, so compute the absolute index by summing the episode
+  // counts of every prior numbered season.
+  try {
+    var resp = await fetchResilient("https://api.themoviedb.org/3/tv/" + tmdbId + "?api_key=" + TMDB_KEY, { retries: 1 });
+    var data = await resp.json();
+    if (!data || !data.seasons) return null;
+    var reqSeason = parseInt(season, 10);
+    var ep = parseInt(episode, 10);
+    if (isNaN(reqSeason) || isNaN(ep) || reqSeason <= 1) return null;
+
+    var cumulative = 0;
+    for (var i = 0; i < data.seasons.length; i++) {
+      var sn = data.seasons[i].season_number;
+      if (sn <= 0) continue; // skip specials
+      if (sn >= reqSeason) break;
+      cumulative += data.seasons[i].episode_count || 0;
+    }
+    return cumulative + ep;
+  } catch (e) {
+    console.error("absolute episode calc failed:", e.message);
+  }
+  return null;
 }
 
 async function getRomajiTitle(tmdbId) {
@@ -417,9 +489,10 @@ function cleanTorrentTitle(title) {
   return cleaned;
 }
 
-function matchEpisode(title, requestedSeason, requestedEpisode) {
+function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) {
   var reqEp = parseInt(requestedEpisode, 10);
   var reqSeason = parseInt(requestedSeason, 10);
+  var abs = (absoluteNumber != null) ? parseInt(absoluteNumber, 10) : NaN;
   if (isNaN(reqEp)) return false;
 
   var cleaned = cleanTorrentTitle(title);
@@ -429,6 +502,16 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
   // the false-positive where a *sequel* sharing the name prefix (e.g.
   // "Code Geass: Dakkan no Roze - 01 ~ 12 [BATCH]") matches a S1E1 request.
   if (BATCH_PATTERN.test(cleaned)) return false;
+
+  // Mid-chain bracket episode number on the RAW title: "[08][WebRip][HEVC_AAC]"
+  // has its brackets stripped by cleanTorrentTitle, so the episode is lost. Only
+  // 1-2 digit numeric brackets are treated as episodes today (resolutions like
+  // "[1080p]" and years like "[2024]" are 3-4 digits or contain non-digits).
+  // No season info is present, so only match S1 requests to avoid false positives.
+  var rawChain = title.match(/\[(\d{1,2})\](?=\[)/i);
+  if (rawChain && reqSeason === 1 && reqEp === parseInt(rawChain[1], 10)) {
+    return true;
+  }
 
   var rangeMatch = cleaned.match(RANGE_PATTERN);
   if (rangeMatch) {
@@ -447,6 +530,12 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
     if (pat.seasonGroup !== null) {
       var foundSeason = parseInt(m[pat.seasonGroup], 10);
       if (foundSeason !== reqSeason) continue;
+    } else if (reqSeason !== 1) {
+      // Season-less episode marker ("E09", "EP239", "[8]") carries no season, so
+      // it only satisfies a S1 request. Without this, "EP239" would match S1..S5
+      // all at ep 239 (multi-season false positives). Absolute cross-season
+      // matching is handled separately via the dash/trailing abs logic.
+      continue;
     }
     var foundEp = parseInt(m[pat.epGroup], 10);
     if (foundEp === reqEp) return true;
@@ -455,23 +544,38 @@ function matchEpisode(title, requestedSeason, requestedEpisode) {
   var dashMatch = cleaned.match(DASH_EP_PATTERN);
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
-    var seasonInTitle = cleaned.match(/\bS(\d+)\b/i);
-    if (seasonInTitle) {
-      // "Show S2 - 08" style: honor the season token.
-      if (parseInt(seasonInTitle[1], 10) === reqSeason && dashEp === reqEp) return true;
+    // Detect ANY season marker ("S2", "Season 2", "S02"). When present, the
+    // dash number is SEASON-RELATIVE — e.g. "Solo Leveling Season 2 - 08" is
+    // S2E8, so it must NOT match a S1E8 request.
+    var seasonInTitle = cleaned.match(SEASON_TOKEN_PATTERN);
+    var titleSeason = seasonInTitle
+      ? parseInt(seasonInTitle[1] || seasonInTitle[2], 10)
+      : null;
+    if (titleSeason !== null) {
+      if (titleSeason === reqSeason && dashEp === reqEp) return true;
     } else if (reqSeason === 1 && dashEp === reqEp) {
       // Absolute "- 08" with no season token (SubsPlease S1).
+      return true;
+    } else if (!isNaN(abs) && dashEp === abs) {
+      // Absolute "- 15" (Bookworm S2 absolute numbering).
       return true;
     }
   }
 
   // Rakun post-processor: trailing number as episode (when no season in title)
-  if (!/\bS(\d+)\b/i.test(cleaned)) {
+  if (!SEASON_TOKEN_PATTERN.test(cleaned)) {
     if (reqSeason === 1) {
       var trailingEp = cleaned.match(/\b(\d{2,4})\s*$/);
       if (trailingEp) {
         var num = parseInt(trailingEp[1], 10);
         if (num === reqEp) return true;
+      }
+    } else if (!isNaN(abs)) {
+      // Absolute numbering with no season token (season > 1).
+      var trailingAbs = cleaned.match(/\b(\d{2,4})\s*$/);
+      if (trailingAbs) {
+        var anum = parseInt(trailingAbs[1], 10);
+        if (anum === abs) return true;
       }
     }
   }
