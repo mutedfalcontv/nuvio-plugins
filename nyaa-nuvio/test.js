@@ -229,6 +229,38 @@ function runOffline() {
     return true;
   })());
 
+  // ---- Part A2: labels ----
+  const tags = ctx.detectAudioTags("[DKB] Some Show - 14 (Dual Audio, Multi-Subs) [1080p]");
+  assert("detectAudioTags finds Multi Subs", tags.indexOf("Multi Subs") !== -1);
+  assert("detectAudioTags finds Dual Audio", tags.indexOf("Dual Audio") !== -1);
+
+  const dubTags = ctx.detectAudioTags("[EMBER] Show S01E01 1080p WEB-DL English Dub");
+  assert("detectAudioTags finds Dubbed", dubTags.indexOf("Dubbed") !== -1);
+
+  assert("detectAudioTags empty for bare title",
+    ctx.detectAudioTags("[SubsPlease] Show - 08 (1080p)").length === 0);
+  assert("detectAudioTags handles a missing title", ctx.detectAudioTags(null).length === 0);
+
+  const name = ctx.formatStreamName(
+    { title: "[SubsPlease] Sousou no Frieren - 08 (1080p)", seeders: 75, sizeLabel: "900.0 MiB" },
+    "1080p",
+    ["Multi Subs"]
+  );
+  const nameLines = name.split("\n");
+  assert("formatStreamName is 4 lines", nameLines.length === 4);
+  assert("formatStreamName line 1 is quality", nameLines[0] === "1080p");
+  assert("formatStreamName line 2 is raw title", nameLines[1] === "[SubsPlease] Sousou no Frieren - 08 (1080p)");
+  assert("formatStreamName line 3 has seeders and size",
+    nameLines[2].indexOf("75") !== -1 && nameLines[2].indexOf("900.0 MiB") !== -1);
+  assert("formatStreamName line 4 is tags", nameLines[3] === "Multi Subs");
+
+  const noTags = ctx.formatStreamName({ title: "X", seeders: 1, sizeLabel: "1.0 MiB" }, null, []);
+  assert("formatStreamName blank tag line when no tags", noTags.split("\n")[3] === " ");
+  assert("formatStreamName blank quality line when unknown", noTags.split("\n")[0] === " ");
+  // A blank line must be a space, not "": Stremio renders an empty line as a
+  // collapsed gap, so the 4-line shape would not hold for untagged releases.
+  assert("formatStreamName never emits an empty line", noTags.split("\n").every(function (l) { return l !== ""; }));
+
   // ---- integration (mocked fetch): SubsPlease + English both returned ----
   return ctx.getStreams("122991", "tv", 1, 8).then(function (res) {
     console.log("  integration results:", res.length);
@@ -236,6 +268,16 @@ function runOffline() {
     const hasEng = res.some(r => /Smoking Behind/.test(r.title));
     assert("integration returns SubsPlease", hasSubs);
     assert("integration returns English-dub", hasEng);
+    // Pins the Step 4 wiring itself: unit tests call formatStreamName directly,
+    // so without this the result object could still carry name: item.title.
+    const labelled = res[0];
+    assert("integration result uses the 4-line label", labelled.name.split("\n").length === 4);
+    assert("integration result keeps title raw for the app to key off",
+      res.every(function (r) { return r.title === r.name.split("\n")[1]; }));
+    assert("integration result still carries machine-readable fields",
+      res.every(function (r) {
+        return r.provider === "Nyaa" && r.type === "tv" && r.infoHash === r.infoHash.toLowerCase();
+      }));
   });
 }
 

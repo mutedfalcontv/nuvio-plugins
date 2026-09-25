@@ -362,11 +362,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           seen[item.infoHash] = true;
 
           var quality = parseQuality(item.title);
+          var tags = detectAudioTags(item.title);
           var magnet = buildMagnet(item.infoHash, item.title);
 
           results.push({
             title: item.title,
-            name: item.title,
+            name: formatStreamName(item, quality, tags),
             url: magnet,
             infoHash: item.infoHash.toLowerCase(),
             quality: quality,
@@ -778,6 +779,44 @@ function parseQuality(title) {
   if (/\b720\b/i.test(title)) return "720p";
   if (/\b480\b/i.test(title)) return "480p";
   return null;
+}
+
+// Audio/subtitle tags, in Torrentio's vocabulary (addon/lib/languages.js).
+// Order is the display order, so the most specific tag reads first.
+var LANGUAGE_TAGS = [
+  { re: /\bmulti[\s-]?subs?\b|\bmultiple[\s-]?sub(?:title)?s?\b/i, label: "Multi Subs" },
+  { re: /\bmulti[\s-]?audio\b/i, label: "Multi Audio" },
+  { re: /\bdual[\s-]?audio\b/i, label: "Dual Audio" },
+  { re: /\beng(?:lish)?[\s-]?dub\b|\bdubbed\b|\bdub\b/i, label: "Dubbed" },
+  { re: /\braw\b|\bunsubbed\b/i, label: "Unsubs" }
+];
+
+// Title-scanning, the way Torrentio's addon/lib/subtitles.js does it: the tag
+// vocabulary is loose on purpose, because release groups spell these a dozen
+// ways and a false positive costs one extra label line while a missed tag looks
+// like an unlabelled release.
+function detectAudioTags(title) {
+  var out = [];
+  if (!title) return out;
+  for (var i = 0; i < LANGUAGE_TAGS.length; i++) {
+    if (LANGUAGE_TAGS[i].re.test(title) && out.indexOf(LANGUAGE_TAGS[i].label) === -1) {
+      out.push(LANGUAGE_TAGS[i].label);
+    }
+  }
+  return out;
+}
+
+// Four fixed lines so narrow UIs have a predictable shape:
+//   <resolution> / <title> / <seeders> <size> <provider> / <tags>
+// A blank field is a single space, never "": Stremio collapses an empty line,
+// so "" would break the 4-line shape for untagged releases.
+function formatStreamName(item, quality, tags) {
+  return [
+    quality || " ",
+    item.title || " ",
+    (item.seeders || 0) + " \uD83D\uDCA9 " + (item.sizeLabel || "?") + " \uD83D\uDCBF Nyaa",
+    (tags && tags.length) ? tags.join(" / ") : " "
+  ].join("\n");
 }
 
 function buildMagnet(infoHash, title) {
