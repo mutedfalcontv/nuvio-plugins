@@ -72,10 +72,16 @@ var BEST_TRACKERS_URL = "https://raw.githubusercontent.com/ngosang/trackerslist/
 // nice-to-have: a slow GitHub must not hold up a stream request, and by the
 // time this resolves the magnets for the current call are already built.
 var BEST_TRACKERS_TIMEOUT_MS = 5000;
+// Minimum gap between re-attempts after a failure. Without it, a tracker-host
+// outage re-issues the GitHub request on every getStreams() call for the life of
+// the process while the warned flag hides it behind a single log line. Long
+// enough to bound the outbound cost, short enough that recovery is quick.
+var BEST_TRACKERS_RETRY_MS = 5 * 60 * 1000;
 
 var bestTrackersCache = null;   // null = never fetched
 var bestTrackersPromise = null; // in-flight guard so concurrent calls don't stack
 var bestTrackersWarned = false; // spec: any failure is logged once
+var bestTrackersRetryAt = 0;    // Date.now() before which no re-attempt is made
 
 // Returns the live best-tracker list, or an empty list before the first fetch
 // or after a failure. Must return an array of announce-URL strings -
@@ -93,6 +99,11 @@ function getBestTrackers() {
 // The anchored scheme requirement is also what excludes comments and headings,
 // so "#" and "//" lines fail the test without a separate comment check - a
 // dedicated one would be unreachable and therefore untestable.
+// The strict \/announce$ tail is deliberate: it cannot admit a scrape endpoint.
+// Verified 2026-09-26 against both upstream lists - 20 of 20 lines in
+// trackers_best.txt and 74 of 74 in trackers_all.txt match, so nothing valid is
+// being discarded today. If upstream ever adds a path like /announce.php those
+// entries would be dropped, and the "best trackers loaded" log is the signal.
 var ANNOUNCE_LINE = /^(https?:\/\/|udp:\/\/)\S*\/announce$/i;
 
 function parseBestTrackers(text) {
@@ -105,17 +116,29 @@ function parseBestTrackers(text) {
   return out;
 }
 
-// Fire-and-forget from getStreams: warms the cache for the *next* call, since
-// buildMagnet is synchronous and cannot wait. Never throws.
+// Warm the cache from getStreams, best effort. Never awaited and never throws
+// into the caller: a slow or dead tracker host must not delay or fail a stream
+// request. buildMagnet reads the cache synchronously and cannot await, so this
+// fetch can only ever serve magnets built after it resolves. Whether that
+// includes the current call's own magnets depends on whether GitHub answers
+// before the TMDB and Nyaa round-trips finish, which nothing here guarantees
+// and nothing depends on.
 function initBestTrackers() {
-  // One guard for the "fetched at most once per process" invariant: the in-flight
-  // promise is both the concurrency guard and the settled-cache guard, since a
-  // completed chain stays assigned. A separate cache check here would be masked
-  // by this line after every success and could not be tested independently.
+  // One guard for the "at most once per process until it succeeds" invariant:
+  // the in-flight promise is both the concurrency guard and the settled-cache
+  // guard, since a completed chain stays assigned. A separate cache check here
+  // would be masked by this line after every success and could not be tested
+  // independently.
   if (bestTrackersPromise) return bestTrackersPromise;
+  // Throttled after a failure: fall back to the static set without going out to
+  // the network again. The guard is released on the far side of this window
+  // rather than latched, so a blip at startup cannot disable the live list
+  // permanently.
+  if (bestTrackersRetryAt && Date.now() < bestTrackersRetryAt) return Promise.resolve([]);
 
-  // No retries: a tracker list that is late is worth less than a stream request
-  // that is on time, and the static set is a usable answer meanwhile.
+  // No in-call retries (retries: 0): a tracker list that is late is worth less
+  // than a stream request that is on time, and the static set is a usable answer
+  // meanwhile. A later getStreams() call retries, subject to the throttle above.
   bestTrackersPromise = fetchResilient(BEST_TRACKERS_URL, {
     headers: { "User-Agent": USER_AGENT },
     retries: 0,
@@ -131,10 +154,23 @@ function initBestTrackers() {
       // suppress every later retry for the life of the process.
       if (!list.length) throw new Error("no announce URLs in response");
       bestTrackersCache = list;
-      // Record the real number rather than assuming it. The static tail holds 21
-      // distinct non-anime entries, so if this prints 21 or more the generic
-      // tracker is unreachable in production and the budget needs revisiting.
-      console.log("best trackers loaded: " + list.length);
+      // Record the number that actually decides 3.2's starvation question: the
+      // count of distinct live entries that are not already in the anime head,
+      // since those are what consume the tail budget. Neither list.length nor
+      // mergeTrackers(list).length works - the first counts duplicates and anime
+      // repeats, the second also counts the generic entries that fill whatever
+      // is left over, and reads 21 live slots for a 20-entry list.
+      var liveSlots = 0;
+      var counted = [];
+      for (var i = 0; i < list.length; i++) {
+        if (TRACKERS_ANIME.indexOf(list[i]) !== -1) continue;
+        if (counted.indexOf(list[i]) !== -1) continue;
+        counted.push(list[i]);
+        liveSlots++;
+      }
+      console.log("best trackers loaded: " + list.length + " (" + liveSlots +
+        " live slots, " + (MAX_TRACKERS - TRACKERS_ANIME.length - liveSlots) +
+        " generic left)");
       return list;
     })
     .catch(function (e) {
@@ -142,12 +178,13 @@ function initBestTrackers() {
         bestTrackersWarned = true;
         console.error("best trackers fetch failed:", (e && e.message) || e);
       }
-      bestTrackersCache = [];
-      // Release the in-flight guard so a later call retries rather than being
-      // stuck replaying this failure for the life of the process. The cache is
-      // left empty; getBestTrackers keeps returning the static fallback because
-      // buildMagnet merges the live list into the static head, not over it.
+      // The cache is left null rather than set to []: it only ever holds a
+      // successful list, so getBestTrackers() synthesises a fresh empty array
+      // and "cached empty" cannot be confused with "fetched and empty".
+      // Release the in-flight guard and re-arm it no sooner than the throttle
+      // window, so recovery stays possible without a per-request retry loop.
       bestTrackersPromise = null;
+      bestTrackersRetryAt = Date.now() + BEST_TRACKERS_RETRY_MS;
       return [];
     });
 
@@ -305,9 +342,10 @@ async function fetchResilient(url, init) {
   for (var attempt = 0; attempt <= retries; attempt++) {
     try {
       var res = await withTimeout(fetch(url, rest), timeoutMs, url);
-      // An explicit guard, not an incidental one: without it a null resolution
-      // is caught below as a TypeError, which works but reports as a property
-      // error rather than the network failure it actually is.
+      // A spec-compliant fetch never resolves null, so this guards a host
+      // polyfill that does. Without it a null is caught below as a TypeError on
+      // res.status, which still fails but reports a property error rather than
+      // the missing response it actually is.
       if (!res) throw new HttpError(0, "no response from " + url);
       if (RETRY_STATUS.indexOf(res.status) === -1) return res;
       lastError = new HttpError(res.status, url + " returned " + res.status);
@@ -379,13 +417,11 @@ function buildQueries(title, season, episode, absolute) {
 
 async function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    // Warm the tracker list in the background. Never awaited: a slow or dead
-    // tracker host must not delay or fail a stream request. buildMagnet reads
-    // the cache synchronously, so this can only help the *next* call - the
-    // magnets for this one are built before the fetch can possibly land.
-    try { initBestTrackers(); } catch (e) { /* best effort */ }
-
     if (mediaType !== "tv" && mediaType !== "series") return [];
+
+    // Below the media-type guard: a movie request produces no magnets, so an
+    // outbound tracker fetch there would be paid for and never used.
+    initBestTrackers();
 
     var titles = (typeof tmdbId === "string" && tmdbId.indexOf("kitsu:") === 0)
       ? await getKitsuTitles(tmdbId)

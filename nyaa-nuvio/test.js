@@ -222,7 +222,12 @@ function runOffline() {
   assert("mergeTrackers spends rejected live slots on the generic tail, not the live list",
     tight.filter(function (t) { return t.indexOf("udp://w") === 0; }).length === 21);
 
-  const magnet = ctx.buildMagnet("AAA11111111111111111111111111111111111111", "Some Title");
+  // A dedicated context: this asserts the *static-only* magnet, which only
+  // holds while nothing has warmed the shared ctx's tracker cache. Reusing ctx
+  // made the assertion order-dependent - inserting any earlier ctx.getStreams()
+  // call would silently turn it into 16.
+  const staticCtx = loadSrc(fakeFetch);
+  const magnet = staticCtx.buildMagnet("AAA11111111111111111111111111111111111111", "Some Title");
   assert("buildMagnet keeps the announce prefix and hash verbatim",
     magnet.indexOf("magnet:?xt=urn:btih:AAA11111111111111111111111111111111111111&dn=") === 0);
   // Pins the dn encoding itself, not just the prefix up to "&dn=". Dropping
@@ -358,7 +363,10 @@ function runOffline() {
     });
   }
 
-  assert("getBestTrackers defaults to empty before fetch", ctx.getBestTrackers().length === 0);
+  // Fresh context for the same reason: this must observe the pre-fetch default,
+  // not depend on no earlier test having warmed the shared ctx.
+  assert("getBestTrackers defaults to empty before fetch",
+    loadSrc(fakeFetch).getBestTrackers().length === 0);
 
   // Spec 3.2: the actual fetched list length must be recorded, so the real-world
   // behaviour is measured rather than assumed. The gate on the static budget is
@@ -380,6 +388,37 @@ function runOffline() {
   return recordCtx.initBestTrackers().then(function () {
     assert("the fetched tracker-list length is recorded",
       loadedLogs.some(function (l) { return /best trackers loaded: 2\b/.test(l); }));
+    // The starvation question in spec 3.2 is "how many slots are left for the
+    // generic set", and the only quantity that answers it is the count of
+    // distinct live entries that are not already in the anime head. Neither the
+    // raw parse length (counts duplicates and anime repeats) nor
+    // mergeTrackers(list).length - head (also counts the generic entries that
+    // fill the leftover slots) is that number - the latter reads 21 live slots
+    // for a 20-entry list. Budget is 25 - 4 head = 21, so 2 live leaves 19.
+    assert("the log reports live slots and the generic budget left",
+      loadedLogs.some(function (l) {
+        return /2 live slots, 19 generic left/.test(l);
+      }), loadedLogs.join(" | "));
+  }).then(function () {
+    // The fetch stubs above all route on the substring "ngosang/trackerslist",
+    // which is a substring of any plausible wrong URL - a wrong branch, a wrong
+    // file, or a wrong host would all still match and every test would pass.
+    // Pin the exact source instead. A tracker list is third-party input that ends
+    // up verbatim in a magnet, so the host is worth asserting, not just present.
+    const EXACT_TRACKER_URL =
+      "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt";
+    let seenTrackerUrl = null;
+    const urlCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        seenTrackerUrl = url;
+        return Promise.resolve({ status: 200, text: () => Promise.resolve("udp://a.example:6969/announce") });
+      }
+      return fakeFetch(url);
+    });
+    return urlCtx.initBestTrackers().then(function () {
+      assert("the tracker source URL is exact, not merely a matching host",
+        seenTrackerUrl === EXACT_TRACKER_URL);
+    });
   }).then(function () {
   // Junk the plan requires be dropped at the parse boundary: a blank line, a
   // comment, a bare number, a non-announce URL, and a leading-whitespace line
@@ -409,6 +448,20 @@ function runOffline() {
       best.indexOf("# a comment line") === -1 &&
       best.indexOf("#udp://tracker.commented.example:6969/announce") === -1);
 
+    // The upstream file is LF today (verified 2026-09-26), but it is served as
+    // raw bytes from a community repo, so a CRLF body is one re-save away. With
+    // \r left on every line the announce test fails on all of them and the
+    // plugin silently drops every live tracker. A spaces-only trim regression
+    // would pass the assertion above, so pin \r explicitly.
+    const crlfCtx = loadWithTrackerBody(
+      "udp://tracker.one.example:6969/announce\r\nudp://tracker.two.example:80/announce\r\n", 200);
+    return crlfCtx.initBestTrackers().then(function () {
+      const crlfBest = crlfCtx.getBestTrackers();
+      assert("a CRLF body is parsed, not silently dropped",
+        crlfBest.length === 2 &&
+        crlfBest[0] === "udp://tracker.one.example:6969/announce" &&
+        crlfBest[1] === "udp://tracker.two.example:80/announce");
+    }).then(function () {
     const withBest = junkCtx.mergeTrackers(best);
     assert("best trackers slot in after the anime block",
       withBest[0] === "http://nyaa.tracker.wf:7777/announce" &&
@@ -428,7 +481,10 @@ function runOffline() {
     // Two calls before the first resolves must share one in-flight promise.
     const both = Promise.all([countingCtx.initBestTrackers(), countingCtx.initBestTrackers()]);
     return both.then(function (settled) {
-      assert("concurrent initBestTrackers calls share one in-flight promise",
+      // This compares the resolved *lists*, not the promises. The fetch count
+      // below is what actually proves one in-flight request; naming it that way
+      // would overstate what identity-on-the-array can show.
+      assert("concurrent initBestTrackers calls resolve to the same cached list",
         settled[0] === settled[1]);
       assert("concurrent initBestTrackers calls issue one fetch", trackerFetches === 1);
       return countingCtx.initBestTrackers().then(function () {
@@ -449,12 +505,50 @@ function runOffline() {
         return fakeFetch(url);
       }).initBestTrackers()
     ]).then(function (results) {
-      assert("an empty body falls back to the static set", JSON.stringify(results[0]) === "[]");
-      assert("a non-200 falls back to the static set", JSON.stringify(results[1]) === "[]");
-      assert("a network error falls back to the static set", JSON.stringify(results[2]) === "[]");
-      assert("a null response falls back to the static set", JSON.stringify(results[3]) === "[]");
+      assert("an empty body resolves to an empty list", JSON.stringify(results[0]) === "[]");
+      assert("a non-200 resolves to an empty list", JSON.stringify(results[1]) === "[]");
+      assert("a network error resolves to an empty list", JSON.stringify(results[2]) === "[]");
+      assert("a null response resolves to an empty list", JSON.stringify(results[3]) === "[]");
+      // Reaching this line at all is the proof that none of the four rejected:
+      // Promise.all short-circuits to the top-level catch on the first rejection,
+      // so an assertion here could not distinguish "resolved empty" from
+      // "rejected". The per-case checks above are about the resolved value.
       assert("no failure path rejects into the caller", results.length === 4);
+      // "Static set unchanged" means the magnet, not just an empty list. Compare
+      // against the 14 static trackers a pre-Part-B buildMagnet would emit.
+      const failedCtx = loadWithTrackerBody("", 200);
+      return failedCtx.initBestTrackers().then(function () {
+        const magnet = failedCtx.buildMagnet("0123456789abcdef0123456789abcdef01234567", "Show 01");
+        const tr = (magnet.match(/&tr=/g) || []).length;
+        assert("a failed fetch leaves the magnet on the 14 static trackers", tr === 14);
+      });
   });
+  });
+  }).then(function () {
+    // The trigger location is the commit's central design decision and was
+    // previously unpinned: moving the warm-up back into buildMagnet - the exact
+    // shape the spec amendment forbids - passes every other assertion here.
+    // This discriminates because fetchResilient calls fetch() as the argument to
+    // withTimeout(), so the stub runs synchronously and the counter is already
+    // incremented by the time buildMagnet returns. Were that rewritten to start
+    // the request after the first await, this assertion would go vacuous while
+    // still reading as a design pin.
+    let trigFetches = 0;
+    const trigCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        trigFetches++;
+        return Promise.resolve({ status: 200, text: () => Promise.resolve("udp://a.example:6969/announce") });
+      }
+      return fakeFetch(url);
+    });
+    trigCtx.buildMagnet("0123456789abcdef0123456789abcdef01234567", "Show 01");
+    assert("buildMagnet alone must not trigger the tracker fetch", trigFetches === 0);
+    return trigCtx.getStreams("122991", "tv", 1, 8).then(function () {
+      assert("getStreams triggers the tracker fetch", trigFetches === 1);
+      return trigCtx.getStreams("122991", "tv", 1, 8);
+    }).then(function () {
+      assert("a second getStreams does not stack another fetch", trigFetches === 1);
+    });
   }).then(function () {
     // Spec 3.3: "any failure ... is logged once". A retry after a failure must
     // not spam the log on every stream request for the life of the process.
@@ -480,14 +574,24 @@ function runOffline() {
         assert("a repeated failure is logged once, not per attempt", logged.length === 1);
         assert("the failure message names the cause",
           logged.length === 1 && /network down/.test(String(logged[0])));
-        // An empty array is truthy, so a bare "if (bestTrackersCache)" guard
-        // treats the failure fallback [] as a populated cache and the process
-        // never retries for its whole lifetime. Each call must re-attempt.
-        assert("a failed fetch is retried on the next call", retryFetches === 3);
+        // Releasing the guard on every failure without a throttle turns a dead
+        // tracker host into one outbound GitHub request per getStreams() call,
+        // forever, while the warned flag hides it behind a single log line.
+        assert("a failing host is not re-fetched on every call", retryFetches === 1);
+        // The guard is released, not latched: once the window passes, a later
+        // call recovers. A permanent latch would let one blip at startup disable
+        // the live list for the lifetime of the process.
+        retryCtx.Date = { now: function () { return retryCtx.clock += retryCtx.BEST_TRACKERS_RETRY_MS; } };
+        return retryCtx.initBestTrackers();
+      })
+      .then(function () {
+        assert("the retry is throttled, not permanent", retryFetches === 2);
+        assert("a throttled retry still logs only once", logged.length === 1);
       });
   }).then(function () {
-    // An empty body must not be cached as a success, or the same truthiness
-    // trap makes the empty result permanent.
+    // An empty body must not be cached as a success. An empty array is truthy,
+    // so caching it under a bare "if (cache)" guard would make the empty result
+    // permanent for the life of the process.
     let emptyFetches = 0;
     const emptyCtx = loadSrc(function (url) {
       if (url.indexOf("ngosang/trackerslist") !== -1) {
@@ -496,33 +600,49 @@ function runOffline() {
       }
       return fakeFetch(url);
     });
+    emptyCtx.clock = 1000;
+    emptyCtx.Date = { now: function () { return emptyCtx.clock; } };
     return emptyCtx.initBestTrackers().then(function () {
-      assert("an empty body is not cached as a success", emptyCtx.getBestTrackers().length === 0);
+      // An empty list must not land in the cache. getBestTrackers() returns []
+      // for both "cached empty" and "never cached", so compare identity: only
+      // the never-cached case hands back a distinct array each call.
+      const a = emptyCtx.getBestTrackers();
+      const b = emptyCtx.getBestTrackers();
+      assert("an empty body is not cached as a success",
+        a.length === 0 && b.length === 0 && a !== b);
       return emptyCtx.initBestTrackers();
     }).then(function () {
-      assert("an empty body is retried on the next call", emptyFetches === 2);
+      assert("an empty body is throttled, not retried immediately", emptyFetches === 1);
+      emptyCtx.clock += emptyCtx.BEST_TRACKERS_RETRY_MS;
+      return emptyCtx.initBestTrackers();
+    }).then(function () {
+      assert("an empty body is retried once the window passes", emptyFetches === 2);
     });
   }).then(function () {
     // The 5s budget is a product requirement, so it is a named constant rather
-    // than a magic number. The wall-clock 5s wait itself is not tested - that
-    // would dominate the suite's runtime to prove a timer was set - so the
-    // override is exercised at 60ms instead, which is the same code path.
+    // than a magic number. This line is a spec pin, not a behaviour test - it
+    // compares a literal to itself and can only fail if someone edits both. The
+    // override block below is what actually proves the constant reaches the call.
     assert("the best-tracker fetch gets its own 5s budget", ctx.BEST_TRACKERS_TIMEOUT_MS === 5000);
     // Pin that the constant is actually wired to the call, not merely declared.
     // Top-level vars become context properties, so the budget can be lowered
     // here and the same code path exercised quickly.
+    const hangTrackerLog = [];
     const hangTrackerCtx = loadSrc(function (url) {
       if (url.indexOf("ngosang/trackerslist") !== -1) return new Promise(function () {});
       return fakeFetch(url);
+    }, {
+      log: function () {}, warn: function () {},
+      error: function () { hangTrackerLog.push(Array.prototype.join.call(arguments, " ")); }
     });
     hangTrackerCtx.BEST_TRACKERS_TIMEOUT_MS = 60;
-    const startedAt = Date.now();
     return hangTrackerCtx.initBestTrackers().then(function (settled) {
       // It resolves rather than rejecting - the timeout is caught and the static
-      // fallback returned. The elapsed time is what proves the lowered budget was
-      // used: the default is 15000ms, so a regression to it blows the 2s bound.
+      // fallback returned. Assert the message rather than elapsed wall clock: a
+      // 2s bound against a 60ms timer is a 33x margin that would flake on a
+      // loaded runner, and the message proves the same override was used.
       assert("the budget constant, not the 15s default, bounds the tracker fetch",
-        Date.now() - startedAt < 2000);
+        /Timeout after 60ms/.test(String(hangTrackerLog[0])));
       assert("a hung tracker fetch resolves to the static fallback, not a rejection",
         Array.isArray(settled) && settled.length === 0 &&
         hangTrackerCtx.getBestTrackers().length === 0);

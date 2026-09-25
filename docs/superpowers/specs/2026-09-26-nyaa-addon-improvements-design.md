@@ -124,20 +124,28 @@ Order matters for the rest: live best trackers are the healthiest of the remaind
 
 The threshold counts only entries *not already in the anime set* — a 21-entry live list that repeats the four anime URLs still leaves 4 generic slots, because dedup returns the freed room. This paragraph originally asserted that the live file "carries far more than 21 unique announce URLs" and that the generic set would therefore get **zero slots in production**. That was an assumption, and Task 5 measured it against the real file.
 
-**Measured 2026-09-26** (live fetch, `best trackers loaded: 20`): 20 announce URLs parse out of `trackers_best.txt`, all 20 are distinct, and none duplicate the anime set. Merged output is 25 entries — the 4 anime head, all 20 live entries, and 4 of the 10 generic. So the generic set is *not* dead in production today; it is one entry away from being, since a single additional live tracker would consume the last slot. The list is community-maintained and can grow at any time, so the starvation path stays documented as the expected outcome rather than the current one.
+**Measured 2026-09-26** (live fetch, `best trackers loaded: 20 (20 live slots, 1 generic left)`): 20 announce URLs parse out of `trackers_best.txt`, all 20 distinct, none duplicating the anime set. The tail budget is 21 (25 − 4), so all 20 fit and **one** generic slot remains — filled by `udp://tracker.coppersurfer.tk:6969/announce`.
 
-Either way the trade is the same and is intentional, not an oversight: the generic trackers carry almost no anime peers, so starving them costs this plugin very little, whereas evicting the anime set would defeat Part A entirely. The fetched length is logged on every successful load precisely so this paragraph can be re-measured instead of re-argued.
+Two things the first reading of that measurement got wrong, both worth recording because the log exists to prevent them:
+
+- Only **1** of the 10 generic entries reaches the magnet, not 4. Three generic entries (`coppersurfer` plus two others) are byte-identical to entries in the live list, so they arrive via the live list and their generic slots are never consumed. Counting "entries in the merged list that appear in `TRACKERS_GENERIC`" reports 4 and double-counts those three.
+- The quantity that decides starvation is **distinct live entries not already in the anime head** — 20 here. Neither the raw parse length nor `mergeTrackers(list).length - 4` is that number: the former counts duplicates and anime repeats, the latter also counts the generic entries filling the leftover slots and reports 21 live slots for a 20-entry list. The log prints the correct figure.
+
+So the generic set is one entry away from being empty in production today, and the list is community-maintained, so treat the starvation path as the expected outcome rather than the current one. The trade is the same either way and is intentional, not an oversight: the generic trackers carry almost no anime peers, so starving them costs this plugin very little, whereas evicting the anime set would defeat Part A entirely.
 
 ### 3.3 Part B — live best trackers
 
 Port of Torrentio `initBestTrackers()` (`addon/lib/magnetHelper.js:8`):
 
 - Source: `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt`
-- Fetched at most once per process, triggered lazily on the first `getStreams()` call. The trigger cannot be `buildMagnet()` as first written: `buildMagnet()` is synchronous and cannot await, so a first call would always build a magnet with no live trackers. Warming at the top of `getStreams()` means the first request uses the static set and later ones use the live list, which is the same "first call may be static" outcome stated in 4.2 without the impossible synchronous wait.
+- Fetched at most once per process **per successful fetch**, triggered lazily on the first `getStreams()` call. A *failed* fetch re-arms the guard, but no sooner than `BEST_TRACKERS_RETRY_MS` (5 minutes) later, so a tracker-host outage cannot turn into one outbound GitHub request per stream request for the life of the process while the once-only warning hides it. The guard is released rather than latched, so a transient blip at startup does not disable the live list permanently.
+- The trigger sits below the `mediaType` guard: a movie request produces no magnets, so it should not pay for a tracker fetch.
+- The trigger cannot be `buildMagnet()` as first written: `buildMagnet()` is synchronous and cannot await, so a first call would always build a magnet with no live trackers. Warming at the top of `getStreams()` means the first request *may* use the static set and later ones use the live list. That is a race, not a guarantee — with a fast or cached response the very first `getStreams()` can already include live trackers, because the TMDB and Nyaa round-trips give the tracker fetch time to land. The outcome is the same either way, and no code path depends on the first call being static.
 - In-flight promise reused so concurrent `getStreams()` calls do not stack fetches
 - 5-second timeout; any failure, non-200, or empty body is logged once and the static set is used unchanged
 - Never throws into `getStreams()`
-- On success the fetched list length is logged (`best trackers loaded: N`) so 3.2's starvation claim is measured, not assumed
+- On success the log reports the raw parse length, the live slots consumed, and the generic budget left (`best trackers loaded: N (M live slots, K generic left)`) so 3.2's starvation claim is measured, not assumed
+- The cache only ever holds a successful list. It is left `null` on failure, so "fetched and empty" is never a state, and `getBestTrackers()` synthesises a fresh empty list
 
 #### Where things live (as of Task 5)
 
@@ -149,17 +157,22 @@ Line numbers in this document drift as code is added, and many citations above a
 | `TRACKERS_ANIME` | 20 |
 | `MAX_TRACKERS` | 29 |
 | `mergeTrackers()` | 35 |
-| `parseBestTrackers()` | 98 |
-| `initBestTrackers()` | 110 |
-| `MAX_STREAMS` | 170 |
-| `getStreams()` | 380 |
-| `MAX_NYAA_REQUESTS` | 430 |
-| `matchEpisode()` | 727 |
-| `parseQuality()` | 863 |
-| `LANGUAGE_TAGS` | 879 |
-| `detectAudioTags()` | 899 |
-| `formatStreamName()` | 931 |
-| `buildMagnet()` | 940 |
+| `ANNOUNCE_LINE` | 107 |
+| `parseBestTrackers()` | 109 |
+| `initBestTrackers()` | 126 |
+| `MAX_STREAMS` | 207 |
+| `getStreams()` | 418 |
+| `MAX_NYAA_REQUESTS` | 466 |
+| `matchEpisode()` | 763 |
+| `parseQuality()` | 899 |
+| `LANGUAGE_TAGS` | 915 |
+| `detectAudioTags()` | 935 |
+| `formatStreamName()` | 967 |
+| `buildMagnet()` | 976 |
+
+#### Known follow-up
+
+`withTimeout()` does not `clearTimeout()` its timer, so a fast response leaves the timer pending for the rest of its window. `Promise.race` absorbs the later rejection, so there is no unhandled rejection — the cost is a retained timer per fetch. This predates Part B and was left alone rather than widened into, but the tracker fetch adds a 5-second timer to every `getStreams()` call, so it is worth a separate fix.
 
 ### 3.4 Part C — matcher hardening (replaces the vendored PTT matcher)
 
