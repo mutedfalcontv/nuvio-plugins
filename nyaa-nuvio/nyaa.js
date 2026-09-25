@@ -782,11 +782,18 @@ function parseQuality(title) {
 }
 
 // Audio/subtitle tags, in Torrentio's vocabulary (addon/lib/languages.js).
-// Order is the display order, so the most specific tag reads first.
+// The order is the display order and groups by kind rather than by
+// specificity: subtitle property, then the two audio properties, then dub.
+// Every alternative is \b-anchored, so "Subs", "Multilingual", "Dual-Byte" and
+// "DUBSTEP" all stay untagged. Pinned by test.js so neither the set nor the
+// order can drift.
 var LANGUAGE_TAGS = [
   { re: /\bmulti[\s-]?subs?\b|\bmultiple[\s-]?sub(?:title)?s?\b/i, label: "Multi Subs" },
   { re: /\bmulti[\s-]?audio\b/i, label: "Multi Audio" },
   { re: /\bdual[\s-]?audio\b/i, label: "Dual Audio" },
+  // The bare \bdub\b alternative does most of the work, since release groups
+  // spell it Dub, DUB, Dubbed, Eng Dub, English-Dub and so on. It cannot fire
+  // on a non-dub in practice - verified against a near-miss table in test.js.
   { re: /\beng(?:lish)?[\s-]?dub\b|\bdubbed\b|\bdub\b/i, label: "Dubbed" }
 ];
 
@@ -794,10 +801,19 @@ var LANGUAGE_TAGS = [
 // vocabulary is loose on purpose, because release groups spell these a dozen
 // ways and a false positive costs one extra label line while a missed tag looks
 // like an unlabelled release.
+//
+// Scans the RAW title, unlike matchEpisode, which reads a bracket-stripped
+// copy. cleanTorrentTitle keeps [] contents but deletes (...) entirely, so
+// scanning the cleaned title would silently drop every paren-wrapped tag -
+// "Show - 07 (English Dub)" would lose its Dubbed label. The divergence is
+// deliberate; test.js pins it with a paren-wrapped case.
 function detectAudioTags(title) {
   var out = [];
   if (!title) return out;
   for (var i = 0; i < LANGUAGE_TAGS.length; i++) {
+    // The indexOf guard is currently unreachable: labels are unique in the
+    // table and each row is tested once per title. It is kept so a future row
+    // reusing a label cannot emit it twice.
     if (LANGUAGE_TAGS[i].re.test(title) && out.indexOf(LANGUAGE_TAGS[i].label) === -1) {
       out.push(LANGUAGE_TAGS[i].label);
     }
@@ -808,11 +824,21 @@ function detectAudioTags(title) {
 // Four fixed lines so narrow UIs have a predictable shape:
 //   <resolution> / <title> / <seeders> <size> <provider> / <tags>
 // A blank field is a single space, never "": Stremio collapses an empty line,
-// so "" would break the 4-line shape for untagged releases.
+// so "" would break the 4-line shape. In production this applies to lines 1 and
+// 4 - the quality and tag lines. Line 2's fallback is dead, since only items
+// with a truthy title are ever pushed, and line 3 never blanks because
+// parseNsTag already normalises seeders to a finite number and falls back to
+// "?" for a missing size.
+//
 // The glyphs are U+1F4BE (floppy) before the size and U+1F4BF (optical disc)
 // before the provider, matching Torrentio's streamInfo. Written as surrogate
 // pairs because \u{...} is ES6 and this file is loaded by a Hermes host; the
-// three confusable code points are U+1F4BE, U+1F4BF and U+1F4A9.
+// three confusable code points are U+1F4BE, U+1F4BF and U+1F4A9. The "?" reads
+// a little like a value rather than an absence, but the spec pins it.
+//
+// item is not null-guarded, unlike detectAudioTags' title: the only caller
+// dereferences item.infoHash several lines earlier, so a null item cannot
+// reach here. Guarding it would imply a caller that does not exist.
 function formatStreamName(item, quality, tags) {
   return [
     quality || " ",

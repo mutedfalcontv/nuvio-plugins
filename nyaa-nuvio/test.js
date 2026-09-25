@@ -239,7 +239,6 @@ function runOffline() {
 
   assert("detectAudioTags empty for bare title",
     ctx.detectAudioTags("[SubsPlease] Show - 08 (1080p)").length === 0);
-  assert("detectAudioTags handles a missing title", ctx.detectAudioTags(null).length === 0);
 
   const name = ctx.formatStreamName(
     { title: "[SubsPlease] Sousou no Frieren - 08 (1080p)", seeders: 75, sizeLabel: "900.0 MiB" },
@@ -250,8 +249,6 @@ function runOffline() {
   assert("formatStreamName is 4 lines", nameLines.length === 4);
   assert("formatStreamName line 1 is quality", nameLines[0] === "1080p");
   assert("formatStreamName line 2 is raw title", nameLines[1] === "[SubsPlease] Sousou no Frieren - 08 (1080p)");
-  assert("formatStreamName line 3 has seeders and size",
-    nameLines[2].indexOf("75") !== -1 && nameLines[2].indexOf("900.0 MiB") !== -1);
   assert("formatStreamName line 4 is tags", nameLines[3] === "Multi Subs");
 
   const noTags = ctx.formatStreamName({ title: "X", seeders: 1, sizeLabel: "1.0 MiB" }, null, []);
@@ -275,12 +272,63 @@ function runOffline() {
   assert("formatStreamName shows 0 seeders rather than blanking the line",
     ctx.formatStreamName({ title: "X", seeders: 0, sizeLabel: "1 MiB" }, "720p", []).split("\n")[2] === "0 \uD83D\uDCBE 1 MiB \uD83D\uDCBF Nyaa");
 
-  // The spec's vocabulary is exactly Torrentio's four words. "Unsubs" was
-  // invented here and false-positives on release names like "H264-Raw".
-  assert("detectAudioTags has no tag outside the spec vocabulary",
-    ctx.detectAudioTags("Show.S01E08.1080p.WEB-DL.H264-Raw").length === 0);
-  assert("detectAudioTags still finds a dub via the loose bare-dub match",
+  // The vocabulary is pinned directly, not inferred from one title's tags.
+  // Asserting "this title yields no tags" cannot see a fifth tag that fires on
+  // some other title, and a521381's removal of Unsubs rested on the vocabulary
+  // being fixed. Order is pinned too, because it is the display order.
+  assert("LANGUAGE_TAGS is exactly the spec vocabulary, in display order",
+    JSON.stringify(ctx.LANGUAGE_TAGS.map(function (t) { return t.label; })) ===
+      '["Multi Subs","Multi Audio","Dual Audio","Dubbed"]');
+
+  // Near-miss titles: every pattern is \b-anchored, and these are the tokens
+  // that could plausibly break the anchoring. Without this table, widening
+  // Dubbed to also match a standalone "sub" was survivable.
+  [
+    "[SubsPlease] Show - 08 (1080p)",
+    "[Erai-raws] Show - 08v2 (1080p)",
+    "[Group] Show - 08 (Multilingual) [1080p]",
+    "[Group] Show - 08 (Dual-Byte) [1080p]",
+    "[Group] Show - 08 (SubDubbed) [1080p]",
+    "[Group] Show - 08 (DUBSTEP) [1080p]",
+    "[Group] Show - 08 (Multimedia) [1080p]",
+    "[Group] Show - 08 (H264-Raw) [1080p]",
+    "[Group] Show - 08 (Redub) [1080p]",
+    // A standalone sub/subs token is the sharpest near-miss: widening Dubbed to
+    // also match one would label every such release as a dub. "SubDubbed" is not
+    // a substitute - there is no word boundary between "Sub" and "Dubbed", so
+    // \bsub\b never matches it. Note that "[Multi Audio] [Sub]" is NOT a
+    // near-miss: "Multi Audio" is in the vocabulary, so it is correctly tagged
+    // and asserting zero tags on it fails.
+    "[Group] Show - 08 (Sub) [1080p]",
+    "Show.S01E08.SUB.1080p"
+  ].forEach(function (title) {
+    assert("detectAudioTags finds nothing in " + JSON.stringify(title),
+      ctx.detectAudioTags(title).length === 0);
+  });
+
+  // Mixed: the subtitle token alone must not become a Dubbed label.
+  assert("detectAudioTags does not call a standalone sub a dub",
+    JSON.stringify(ctx.detectAudioTags("Show - 08 (Sub) [1080p]")) === "[]");
+  assert("detectAudioTags tags multi-audio alongside a sub token",
+    JSON.stringify(ctx.detectAudioTags("[Group] Show - 08 [Multi Audio] [Sub]")) === '["Multi Audio"]');
+
+  // Tags are scanned from the raw title, unlike matchEpisode which reads a
+  // bracket-stripped copy. Paren-wrapped tags are the case that would silently
+  // disappear if the cleaned title were ever used instead.
+  assert("detectAudioTags finds a paren-wrapped tag",
+    ctx.detectAudioTags("Show - 07 (English Dub) [1080p]").indexOf("Dubbed") !== -1);
+  assert("detectAudioTags finds a paren-wrapped multi-subs tag",
+    ctx.detectAudioTags("Show - 07 (Multi Subs) [1080p]").indexOf("Multi Subs") !== -1);
+  // The loose bare-dub alternative does most of the work, so it is pinned
+  // directly rather than through a spelling the first alternative also matches.
+  assert("detectAudioTags matches a standalone bare 'Dub'",
     ctx.detectAudioTags("Show 08 1080p Dub").indexOf("Dubbed") !== -1);
+  assert("detectAudioTags matches 'DUBBED' case-insensitively",
+    ctx.detectAudioTags("Show 08 1080p DUBBED").indexOf("Dubbed") !== -1);
+  assert("detectAudioTags matches 'Eng Dub'",
+    ctx.detectAudioTags("Show 08 1080p Eng Dub").indexOf("Dubbed") !== -1);
+  assert("detectAudioTags matches 'English-Dub'",
+    ctx.detectAudioTags("Show 08 1080p English-Dub").indexOf("Dubbed") !== -1);
 
   // detectAudioTags(null) must not rely on RegExp coercion: test(null) matches
   // the string "null", so removing the guard left this assertion green.
@@ -300,16 +348,27 @@ function runOffline() {
     assert("integration result uses the 4-line label", labelled.name.split("\n").length === 4);
     assert("integration result keeps title raw for the app to key off",
       res.every(function (r) { return r.title === r.name.split("\n")[1]; }));
-    // Spec line 101 pins all eight machine-readable fields. Dropping url,
-    // seeders, size or quality from the result object must fail here.
-    assert("integration result still carries every machine-readable field",
-      res.every(function (r) {
-        return r.provider === "Nyaa" && r.type === "tv" &&
-          r.infoHash === r.infoHash.toLowerCase() && /^[0-9a-f]{32,}$/.test(r.infoHash) &&
-          typeof r.url === "string" && r.url.indexOf("magnet:?xt=urn:btih:") === 0 &&
-          typeof r.seeders === "number" && typeof r.size === "number" && r.size > 0 &&
-          typeof r.quality === "string" && r.quality.length > 0;
-      }));
+    // Spec line 101 names eight fields untouchable. Each axis gets its own
+    // assert so a failure says which one broke, and each is checked for the
+    // real invariant rather than a shape production never produces.
+    assert("integration result keeps url", res.every(function (r) {
+      return typeof r.url === "string" && r.url.indexOf("magnet:?xt=urn:btih:") === 0;
+    }));
+    assert("integration result keeps a lowercase hex infoHash", res.every(function (r) {
+      return /^[0-9a-f]{32,}$/.test(r.infoHash);
+    }));
+    assert("integration result keeps numeric seeders", res.every(function (r) {
+      return typeof r.seeders === "number" && r.seeders > 0;
+    }));
+    assert("integration result keeps numeric size", res.every(function (r) {
+      return typeof r.size === "number" && r.size > 0;
+    }));
+    assert("integration result keeps a resolved quality", res.every(function (r) {
+      return typeof r.quality === "string" && r.quality.length > 0;
+    }));
+    assert("integration result keeps provider and type", res.every(function (r) {
+      return r.provider === "Nyaa" && r.type === "tv";
+    }));
   });
 }
 
