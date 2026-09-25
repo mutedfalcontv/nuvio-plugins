@@ -144,9 +144,9 @@ if (process.argv.indexOf("--gate") !== -1) process.exit(ok ? 0 : 1);
 - [ ] **Step 4: Record the BEFORE score**
 
 Run: `node nyaa-nuvio/bench.js`
-Expected: **exactly 9 false negatives** (ids `21` through `29`), **0 false positives**, recall well below 1.000. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 3.
+Expected: **exactly 9 false negatives** (ids `21` through `29`) and **2 false positives** (`38-neg-parenthesised-season-s1`, `40-neg-spaced-s2-not-s1`). Precision 0.833, recall 0.526, F1 0.645. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 6.
 
-If you see any false positive, stop and report it: that means the pre-existing matcher is already wrong about something the corpus assumed, and the `expect` value needs a decision, not a code change.
+The 2 false positives are pre-existing matcher bugs that this corpus newly exposed, not corpus errors. A title explicitly marked `(Season 2)` currently satisfies an S1 request, and `S2 - E08` currently satisfies an S1E8 request — both would open the wrong file. They are in scope for Task 2 and share a root cause with two of the misses, so the same fix clears them.
 
 - [ ] **Step 5: Confirm the existing suite is still green**
 
@@ -212,7 +212,12 @@ Append these inside `runOffline()` in `nyaa-nuvio/test.js`, immediately before t
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `node nyaa-nuvio/test.js`
-Expected: FAIL. The 6 positive assertions fail; the 8 guard assertions pass. If any guard fails **before** you change anything, stop and report — that is a pre-existing bug, not something this task should absorb silently.
+Expected: FAIL with this precise shape:
+- all **6 positive** assertions fail — those are the gaps
+- **2 guard** assertions also fail: `guard: parenthesised season still blocks S1`, and the S1 half of `guard: spaced S2 - E08 does not match S1 or S3`. These are corpus cases `38` and `40`, the pre-existing false positives Task 1 exposed. They are in scope for this task.
+- the other 6 guard assertions pass
+
+If a **different** set fails, stop and report. Never edit an assertion to make it pass — the corpus ground truth was frozen for exactly this reason.
 
 - [ ] **Step 3: Fix the dash-episode pattern (4-digit + revision suffix)**
 
@@ -225,27 +230,63 @@ Find `DASH_EP_PATTERN` in the constants block near the top of `nyaa.js`. It curr
 var DASH_EP_PATTERN = /-\s+(\d{1,4})\s*(?:v\d+)?(?![0-9a-z])/i;
 ```
 
-- [ ] **Step 4: Fix the season-token pattern (parenthesised `Season N`)**
+- [ ] **Step 4: Read the season off the RAW title, not the cleaned one**
 
-Find `SEASON_TOKEN_PATTERN`. It currently matches bare `S2` and `Season 2`, so `(Season 2)` slips through and the dash branch then treats the number as season-relative to an unknown season. Tolerate surrounding brackets:
+`cleanTorrentTitle` strips `(...)` at `nyaa.js:483`, so by the time `SEASON_TOKEN_PATTERN` runs, `(Season 2)` is already gone and its absence is indistinguishable from "this title declares no season" — which is precisely why a Season 2 release satisfies an S1 request today. **Widening the season pattern alone cannot fix this.** The season has to be read before cleaning.
+
+Add a raw-title probe:
 
 ```javascript
-// S2 / S02 / Season 2 / (Season 2) / [Season 2]. The bracket tolerance matters
-// because release groups routinely parenthesise the season: "Show (Season 2) - 13".
-var SEASON_TOKEN_PATTERN = /(?:\bS(\d{1,2})\b|\b(?:Season|Saison)[.\s_-]?(\d{1,2})\b)/i;
+// Read on the RAW title. cleanTorrentTitle() strips "(...)" before any season
+// pattern runs, so "Show (Season 2) - 13" would otherwise look season-less and
+// satisfy an S1 request. Release groups routinely parenthesise the season.
+var RAW_SEASON_PATTERN = /(?:^|[^A-Za-z0-9])(?:S(\d{1,2})\b|(?:Season|Saison)[.\s_-]?(\d{1,2})\b)/i;
+
+function rawTitleSeason(title) {
+  var m = String(title || "").match(RAW_SEASON_PATTERN);
+  if (!m) return null;
+  return parseInt(m[1] || m[2], 10);
+}
 ```
 
-Group 1 is the `S2` form, group 2 the spelled form — the existing `parseInt(seasonInTitle[1] || seasonInTitle[2], 10)` call site already handles both, so no call-site change is needed. Confirm that by reading the usage before you edit.
+Then, inside `matchEpisode`, compute the effective title season once and use it everywhere the code currently asks "does this title declare a season?":
 
-- [ ] **Step 5: Add the spaced `S2 - E08` pattern**
+```javascript
+  var rawSeason = rawTitleSeason(title);
+  var seasonInTitle = cleaned.match(SEASON_TOKEN_PATTERN);
+  var titleSeason = rawSeason !== null
+    ? rawSeason
+    : (seasonInTitle ? parseInt(seasonInTitle[1] || seasonInTitle[2], 10) : null);
+  var titleDeclaresSeason = titleSeason !== null;
+```
 
-Add a new entry to the `EPISODE_PATTERNS` array. It must declare its season group, otherwise the season-less guard at `nyaa.js:533-539` will reject every non-S1 request:
+Substitute `titleDeclaresSeason` for the existing `SEASON_TOKEN_PATTERN.test(cleaned)` guards in the dash branch and the Rakun trailing-number branch, and `titleSeason` for the dash branch's local `titleSeason` computation. Read the current code first and preserve the existing `if / else if` structure exactly — the chain's shape is what makes an S2 title refuse an S1 request while still honouring `absoluteNumber`. Do not introduce a second, competing definition of "does this title have a season".
+
+This is also what makes corpus case `28` pass, not just `38`: once `(Season 2)` is honoured, the dash number `13` is correctly read as season-relative to season 2, so it matches an S2E13 request and is refused for S1.
+
+- [ ] **Step 5: Add the spaced `S2 - E08` pattern, and stop season-less patterns firing on titled seasons**
+
+Add a new entry to the `EPISODE_PATTERNS` array. It must declare its season group, otherwise the season-less guard rejects every non-S1 request:
 
 ```javascript
   { re: /\bS(\d{1,2})\s*-\s*E(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 }
 ```
 
-The existing loop reads `pat.seasonGroup` and `pat.epGroup` and requires season equality when `seasonGroup !== null`, so no loop change is required.
+That fixes corpus case `29`, but **not** `40`. `EPISODE_PATTERNS` already contains a bare `/\bE(\d+)\b/i` that matches the `E08` in `EngSub Show S2 - E08` and reports it as an episode with no season attached — and the existing guard only refuses when the *request* is not season 1, without ever checking whether the *title* declares a season. So the title's own `S2` is ignored.
+
+Widen that guard, in the `EPISODE_PATTERNS` loop:
+
+```javascript
+    } else if (reqSeason !== 1 || titleDeclaresSeason) {
+      // Season-less episode marker ("E09", "EP239", "[8]") carries no season, so
+      // it only satisfies a S1 request — and only when the title itself declares
+      // no season either. "EngSub Show S2 - E08" carries S2, so the bare E(\d+)
+      // handler must not treat E08 as an S1 episode.
+      continue;
+    }
+```
+
+**This is the highest-risk edit in the task.** `titleDeclaresSeason` is true for any title containing `S<digit>`, including `S01E08` forms that may be relying on a season-less handler. The corpus is the safety net: cases `04` (`Show - S01E08`) and `18` (`Grand Blue Dreaming S03E09`) both declare a season and must keep matching. If the gate fails on either, the guard is too broad — narrow it rather than touching the corpus.
 
 - [ ] **Step 6: Run the tests**
 

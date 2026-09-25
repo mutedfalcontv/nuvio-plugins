@@ -29,20 +29,23 @@ if (typeof ctx.matchEpisode !== "function") {
 }
 
 let tp = 0, fp = 0, fn = 0, tn = 0;
-const missed = [], falsePositives = [];
+const missed = [], falsePositives = [], thrown = [];
 
 for (const c of CORPUS.cases) {
-  let got;
+  let got, err = null;
   try {
     got = ctx.matchEpisode(c.title, c.season, c.episode, c.absolute) === true;
   } catch (e) {
     got = false;
-    falsePositives.push(c.id + " (threw: " + (e.message || e) + ")");
+    err = e;
   }
   if (c.expect && got) tp++;
   else if (!c.expect && got) { fp++; falsePositives.push(c.id + " matched but should be rejected"); }
   else if (c.expect && !got) { fn++; missed.push(c.id); }
   else tn++;
+  // Reported separately: a throw is already counted as FN or TN by the cascade
+  // above, so listing it here too would desync the header count from the FP tally.
+  if (err) thrown.push(c.id + " threw: " + (err.message || err));
 }
 
 const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
@@ -60,6 +63,10 @@ if (missed.length) {
 if (falsePositives.length) {
   console.log("\nfalse positives (" + falsePositives.length + ") - things we matched that must not match:");
   for (const s of falsePositives) console.log("  " + s);
+}
+if (thrown.length) {
+  console.log("\nthrew (" + thrown.length + ") - matchEpisode raised on these; scored as non-match:");
+  for (const s of thrown) console.log("  " + s);
 }
 
 const ok = precision === 1 && recall === 1;

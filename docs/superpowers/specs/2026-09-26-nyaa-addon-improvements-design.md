@@ -258,3 +258,52 @@ Each part is an isolated block. A, B, and C can be reverted independently, in an
 - Debrid work is out of scope — the app already does it
 - No new npm dependencies; everything inlined into `nyaa.js`
 - The anime tracker set stays ahead of the live best trackers under the 25 cap — the best list alone can fill all 25 slots and evict the anime trackers, which are the point of Part A
+
+## Appendix A — Measured results (2026-09-26)
+
+### A.1 Matcher, before hardening
+
+`node nyaa-nuvio/bench.js` at commit `755b7c5`, over the 42-case corpus (19 positives, 23 negatives):
+
+| TP | FP | FN | TN | Precision | Recall | F1 |
+|---|---|---|---|---|---|---|
+| 10 | 2 | 9 | 21 | 0.833 | 0.526 | 0.645 |
+
+False negatives — real Nyaa releases the matcher fails to return:
+
+| id | Pattern | Release |
+|---|---|---|
+| 21 | 4-digit absolute, parenthesised | `[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv` |
+| 22 | 4-digit absolute, bare | `[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]` |
+| 23 | `v2` revision suffix | `[SubsPlease] Show - 09v2 (1080p)` |
+| 24 | `v2` revision suffix | `[Doki] Show - 08v2 (1080p) [HEVC-10bit]` |
+| 25 | `v2` revision suffix | `[Anime Time] Show - 12v2 (1080p)` |
+| 26 | `v3` revision suffix | `[Anime Time] Show - 12v3 (1080p)` |
+| 27 | 4-digit absolute | `[SubsPlease] One Piece - 1150 (1080p) [A1B2C3D4].mkv` |
+| 28 | spelled `Season N` | `[Judas] Show (Season 2) - 13 [1080p]` |
+| 29 | spaced `S2 - E08` | `[EngSub] Show S2 - E08 (1080p)` |
+
+False positives — worse than the misses, because each returns a real file for the wrong episode:
+
+| id | Request | Why it wrongly matches |
+|---|---|---|
+| 38 | S1E13 | `cleanTorrentTitle` strips `(Season 2)`, so no season is detected and the dash branch treats `- 13` as a season-1 absolute. A Season 2 release satisfies a Season 1 request. |
+| 40 | S1E8 | The bare `E(\d+)` handler matches the `E08` in `S2 - E08` and reports it season-less; the guard only checks the *request's* season, never the *title's*. |
+
+Both false positives share a root cause with a false negative — `38` with `28`, `40` with `29` — so the same fix clears each pair. The corpus went from "20 cases that all passed" to "42 cases the existing matcher fails 11 of".
+
+### A.2 Matcher, after hardening
+
+Pending — Task 2.
+
+### A.3 Live end-to-end
+
+Pending — Task 6.
+
+### A.4 Tracker reachability
+
+Pending — Task 6.
+
+### A.5 Rejected: vendored `parse-torrent-title`
+
+Part C was originally specified as a vendored, flag-gated `parse-torrent-title@3.0.1` second matcher. It was built and measured against the 9 misses above and resolved **none** of them: PTT has no bare-number handler, so every case returned `season: undefined, episode: undefined` and would have fallen back to `matchEpisode()` regardless. The union would have been `current || current`. The design was rewritten to harden the existing matcher instead, avoiding roughly 200 vendored lines and a runtime flag.
