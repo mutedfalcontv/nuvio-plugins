@@ -202,7 +202,7 @@ All four fixes are additions to the existing rule chain in `matchEpisode()` (`ny
 
 > Every verdict change must be either a false negative becoming a match, or a false positive becoming a rejection — and the corpus is the only thing permitted to decide which.
 
-Nothing guarantees supersetness. What the corpus guarantees is that all 55 cases now resolve correctly (Appendix A.2), and that the 34 of them asserting `false` did not stop asserting it.
+Nothing guarantees supersetness. What the corpus guarantees is that all 66 cases now resolve correctly (Appendix A.2), and that the 39 of them asserting `false` did not stop asserting it.
 
 ### 3.5 Error handling
 
@@ -404,14 +404,72 @@ To be precise about direction of travel: **`Show - 265v2` did not match before T
 
 **On the non-string input caveat.** `matchEpisode` still throws if handed a non-string `title` or an object `season`/`episode`/`absolute`, because `cleanTorrentTitle` calls `.replace` unguarded. Pre-existing and unchanged. Unreachable from `getStreams`: `parseRssItems` gates on a truthy `item.title`, and season and episode arrive as numbers. A 147,465-input string fuzz returns a strict boolean with zero throws.
 
-### A.3 Live end-to-end
+### A.3 Matcher before/after on one corpus
 
-Pending — Task 6.
+A.1 and A.2 are **not** comparable to each other: A.1 scored the 52-case corpus that existed at `8e19183`, and A.2 scored the 66-case corpus that Task 2 grew it into. The extra 14 cases include 10 that specifically target the defects A.1 lists, so A.2's clean sweep was partly measured against a harder corpus. The commit message for `59906bb` reports the old matcher as `TP 10 FP 7 FN 10 TN 25` — that is the 52-case figure, not a 66-case one.
 
-### A.4 Tracker reachability
+Scoring both matcher versions against the **same** 66 cases isolates the matcher:
 
-Pending — Task 6.
+| Stage | TP | FP | FN | TN | Precision | Recall | F1 |
+|---|---|---|---|---|---|---|---|
+| before hardening (`261015b`) | 11 | 13 | 16 | 26 | 0.458 | 0.407 | 0.431 |
+| after hardening (`f3ce2af`) | 27 | 0 | 0 | 39 | 1.000 | 1.000 | 1.000 |
 
-### A.5 Rejected: vendored `parse-torrent-title`
+16 of 27 real releases were missed before, and 13 negatives were wrongly returned. Reproduce with the current `corpus.json` and `bench.js` pointed at each version of `nyaa.js`.
+
+### A.4 Live end-to-end
+
+`LIVE=1 node nyaa-nuvio/test.js` passes, including the random current-release pick. Per-title stream counts come from an A/B that fetches each Nyaa query **once** and replays the identical RSS items through both matchers — nyaa.si results drift between runs, so fetching separately per version would have measured the network rather than the matcher.
+
+| Title | S | E | Streams before | Streams after | Delta |
+|---|---|---|---|---|---|
+| Steins;Gate | 1 | 1 | 2 | 2 | = |
+| Cowboy Bebop | 1 | 1 | 1 | 1 | = |
+| Bakemonogatari | 1 | 1 | 4 | 4 | = |
+| Fullmetal Alchemist Brotherhood | 1 | 5 | 1 | 1 | = |
+| Clannad | 1 | 3 | 3 | 4 | **+1** |
+| Code Geass | 1 | 1 | 10 | 10 | = |
+| Neon Genesis Evangelion | 1 | 1 | 12 | 12 | = |
+| **total** | | | **33** | **34** | **+1** |
+
+The single gain is `[dozo]_Clannad_1-3_DVD`, the underscore-delimited `1-3` form, which the old matcher rejected.
+
+**Read the +1 honestly.** The four hardened branches moved the live count by one across seven titles, because these seeded queries return mostly clean `S1E1` shapes that both versions already handled. The branches earn their place on long-running series and odd release shapes, which is what the 16 recovered corpus positives measure and what these seven titles do not exercise. The precision result is the larger one: 13 false positives to 0, where each false positive silently offered a real file for the wrong episode.
+
+### A.5 Tracker reachability
+
+`node nyaa-nuvio/tracker-health.js`, measured 2026-09-26 from one workstation. Liveness only — a reachable tracker may still hold no peers for a given infoHash.
+
+| Set | Reachable | Total | of which UDP |
+|---|---|---|---|
+| anime set only | 2 | 4 | 0/1 |
+| legacy generic only | 0 | 10 | 0/9 |
+| live list only | 2 | 20 | 0/18 |
+| merged (shipped) | 4 | 25 | 0/20 |
+
+HTTP, 4 of 6 distinct entries answered. `tracker.anirena.com:80` → `200`; `nyaa.tracker.wf:7777`, `tracker.dler.com:6969`, `tracker.renfei.net:8080` → `400`. A `400` on `/announce` is a live host: a GET without announce query parameters is expected to be rejected. The two failures are `anidex.moe:6969` (`ECONNREFUSED`) and `tracker.bt-hash.com:443` (`DEPTH_ZERO_SELF_SIGNED_CERT`).
+
+**The UDP result is real deadness, not a blocked probe.** A first pass reported 0/25 with a binary ALIVE/DEAD, which is indistinguishable from a network that drops UDP. Re-probing serially at 10s with a three-way verdict resolved it: `tracker-udp.gbitt.info:80` returns a genuine 19-byte BEP 15 response with action 3 in **156ms**, so UDP round trips work here. The other 24 sat at the full 10s timeout, meaning no packet came back at all. Of those 24, `tracker.tiny-vps.com` does not resolve (`ENOTFOUND`, 23ms).
+
+| UDP verdict (25 distinct) | Count |
+|---|---|
+| ok — action 0 connect response | **0** |
+| refused — host answered, non-zero action | 1 |
+| silent — no response within 10s | 24 |
+
+"Refused" and "silent" are different faults and want different fixes: the first tracker is up and declining, the rest are gone or filtered. The binary verdict in `tracker-health.js` folds both into DEAD, which is why the per-entry note is kept in its output.
+
+**Do not prune UDP on this evidence.** UDP reachability is network-dependent — many routers and ISPs filter it — so a tracker that is silent from this workstation may serve users perfectly well. The plan anticipated this and asked for the number reported rather than tuned; these figures characterise one vantage point and nothing more.
+
+**What the 25 cap costs.** The shipped magnet is 4 anime + 20 live + 1 generic, drawn from a distinct pool of 31. The 6 evicted entries are 5 silent UDP trackers (`leechers-paradise`, `arenabg`, `internetwarriors`, `cyberia`, `tiny-vps`) and the self-signed-cert HTTPS tracker. The cap evicts one broken entry and five dead ones while keeping all four answering HTTP trackers — convenient, not designed.
+
+### A.6 Verdict
+
+- **The matcher hardening paid off, and the payoff is precision, not volume.** 16 of 27 corpus positives recovered and 13 false positives eliminated. On live titles it is worth exactly +1 stream, because the shapes it fixes are rare in a seeded sample and common in long-runners.
+- **The anime tracker set is not validated by this probe, in either direction.** 2 of 4 are reachable and the single UDP anime tracker is silent. Reachability cannot show peer availability, so Part A's premise stands unproven rather than refuted. Settling it needs a real scrape — announce a known infoHash and count returned peers — which reachability probing cannot provide. Recorded as an open question, not a result.
+- **Generic starvation is confirmed and is intentional.** 1 of 10 generic entries reaches the magnet, the three-way overlap analysis in 3.2 explains why, and the trade is deliberate.
+- **The live list did its job as a liveness filter by accident.** The four answering HTTP trackers all came from the live list, and the one broken-certificate tracker in the static set was evicted by the cap. With a stale static list the addon would have shipped the dead-cert entry and missed the working ones. One run on one network is not a trend, but it is consistent with fetching the list at all.
+
+### A.7 Rejected: vendored `parse-torrent-title`
 
 Part C was originally specified as a vendored, flag-gated `parse-torrent-title@3.0.1` second matcher. It was built and measured against the 9 misses above and resolved **none** of them: PTT has no bare-number handler, so every case returned `season: undefined, episode: undefined` and would have fallen back to `matchEpisode()` regardless. The union would have been `current || current`. The design was rewritten to harden the existing matcher instead, avoiding roughly 200 vendored lines and a runtime flag.
