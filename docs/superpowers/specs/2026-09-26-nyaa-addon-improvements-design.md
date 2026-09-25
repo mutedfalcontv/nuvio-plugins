@@ -124,24 +124,35 @@ Port of Torrentio `initBestTrackers()` (`addon/lib/magnetHelper.js:8`):
 - 5-second timeout; any failure, non-200, or empty body is logged once and the static set is used unchanged
 - Never throws into `getStreams()`
 
-### 3.4 Part C — PTT matcher (default off)
+### 3.4 Part C — matcher hardening (replaces the vendored PTT matcher)
 
-- Vendor the full `parse-torrent-title@3.0.1` source verbatim into `nyaa.js` behind a clearly marked block, with the upstream version and retrieval date recorded in the block header. No edits to parser internals.
-- `matchEpisodePTT(title, season, episode, absolute)` parses the raw title, then applies the same acceptance rules the current code already uses, so behaviour stays comparable:
-  - reject batch/complete/season-pack for a single-episode request (`BATCH_PATTERN`, `nyaa.js:43`)
-  - require season equality when the parsed title declares a season
-  - accept a parsed episode equal to the requested episode, or equal to the computed absolute number
-- Selection is one line, and when the flag is on it takes the **union**, not a replacement:
-  `var match = USE_PTT ? (matchEpisode(...) || matchEpisodePTT(...)) : matchEpisode(...);`
-  where `USE_PTT` is read once at module load from `NYAA_PTT === '1'` (global injected by Nuvio, same mechanism as the existing `TMDB_API_KEY` global at `nyaa.js:21`).
-- **Superset guarantee:** a matcher that only replaced the old one could silently lose results. The union cannot, and the corpus proves it numerically (criterion 2 in 4.5).
+**This section was rewritten after measurement. See 4.2 for the evidence.**
+
+The original design vendored `parse-torrent-title@3.0.1` and unioned it with the existing matcher behind an `NYAA_PTT` flag. That was built, then measured, and it does not work:
+
+- A probe of 32 realistic Nyaa title patterns found **8 genuine misses** in the current `matchEpisode()`: 4-digit absolute episode numbers (`One Piece - 1122`), `v2`/`v3` revision suffixes (`- 09v2`), spelled-out `Season N` (`Show (Season 2) - 13`), and the `S2 - E08` form.
+- `parse-torrent-title` 3.0.1 was run against all 8. It resolved **zero** of them, returning `season: undefined, episode: undefined` for every one. PTT has no handler for bare numbers, because a bare number in a release name is usually a resolution or a year, not an episode.
+- Since PTT finds no episode, the proposed `matchEpisodePTT` would have delegated every one of the 8 back to `matchEpisode`, which already fails them. The union would have been `current || current` — identical to `current`, at the cost of ~200 vendored lines.
+- The corpus independently could not have caught this: its 20 cases were mirrored from `test.js`, which the current matcher already passes 10/10 (F1 1.000), and the pre-committed gate `hybrid F1 > current F1` is unsatisfiable because nothing exceeds F1 1.000.
+
+Conclusion: PTT solves a problem this plugin does not have, and does not touch the problem it has. Part C is dropped. The fix is to harden `matchEpisode` at its four actual fault lines.
+
+All four fixes are additions to the existing rule chain in `matchEpisode()` (`nyaa.js:492-596`). Each is guarded so it can only fire on a shape that is unambiguously an episode marker, and each keeps the existing batch/range/season guards in force:
+
+| Gap | Root cause | Fix shape |
+|---|---|---|
+| 4-digit absolute (`One Piece - 1122`) | The Rakun trailing-number rule (`nyaa.js:568`) requires end-of-string, so a trailing `.mkv` defeats it | Extend the dash-episode pattern to 1-4 digits, anchored on the release group's dash form, still requiring the absence of a season token unless the season matches |
+| `v2`/`v3` suffix (`- 09v2`) | The dash-episode pattern requires a non-alphanumeric boundary after the number | Allow an optional `v\d+` revision suffix and ignore it |
+| Spelled `Season N` (`Show (Season 2) - 13`) | `SEASON_TOKEN_PATTERN` matches `S2` and `Season 2` but not the parenthesised `(Season 2)` form | Extend the season-token pattern to tolerate surrounding brackets |
+| `S2 - E08` | No episode pattern covers the spaced `S2 - E08` form | Add a dedicated pattern with the season group bound to the request, so it cannot match across seasons |
+
+**Superset guarantee.** Each fix widens an existing branch rather than adding a competing matcher, so no previously-matching verdict can flip to false. The corpus proves that numerically (criterion 2 in 4.5).
 
 ### 3.5 Error handling
 
 | Failure | Behaviour |
 |---|---|
 | Best-tracker fetch fails / times out | Static sets only, one `console.error`, no throw |
-| PTT throws on a malformed title | Fall back to `matchEpisode()` for that title, one log line, no stream loss |
 | `detectAudioTags` finds nothing | Single-space line, label still well-formed |
 | Part A/B/C code paths | No new failure mode reaches `getStreams()`'s existing `try/catch` (`nyaa.js:247`) |
 
@@ -153,7 +164,7 @@ getStreams(tmdbId, mediaType, season, episode)
   -> getAbsoluteEpisode                (unchanged)
   -> buildQueries per title            (unchanged, budget 20)
   -> searchNyaa (RSS)                  (unchanged)
-  -> matchEpisode | matchEpisodePTT    (Part C, flag-gated)
+  -> matchEpisode                    (Part C: hardened, same function)
   -> buildMagnet (+ Part B trackers)   (Part B)
   -> formatStreamName                  (Part A2)
   -> sort by seeders, slice 40         (unchanged)
@@ -182,20 +193,21 @@ New file `nyaa-nuvio/corpus.json`:
 ```
 
 - 15 request shapes minimum, chosen to cover the classes that broke in past patches: S1 absolute (`- 08`), S2 absolute (`- 13`), cross-season absolute (S2E13 -> absolute 25), explicit `S02E08`, dub-only, multi-audio, batch pack (expect `false`), sequel-name false positive (expect `false`), resolution-as-episode trap (`H.264`), bracket-chain `[08][WebRip]`, 3-digit episode, episode 100+, hyphen season form `S2 - 08`, `EP239`-style long counter, and one non-anime false-positive guard
+- Plus a second block, added after the first measurement round showed the first block could not detect improvement (see 4.2): 8 positives harvested from a 32-pattern probe of real release names, each one a pattern the pre-existing matcher actually misses, plus a negative counterpart for every one of them
 - Real titles harvested through the existing `LIVE=1` path in `test.js`, then frozen
 - `expect` is the ground truth for "should this title match this request"
 
 ### 4.2 Stage 2 — matcher A/B (the primary result)
 
-New file `nyaa-nuvio/bench.js` runs three matchers over every corpus case:
+**The corpus has two parts, and the second is the one that matters.**
 
-| Matcher | Definition |
-|---|---|
-| `current` | existing `matchEpisode()` — regex list |
-| `ptt` | vendored PTT path only |
-| `hybrid` | `current \|\| ptt` — exactly what Part C ships when `NYAA_PTT=1` |
+The first 20 cases were mirrored from `test.js` to prove the hardened matcher breaks nothing. On their own they are worthless as an improvement signal: the pre-existing matcher already scored 10 TP / 0 FP / 0 FN on them, F1 1.000, which also made the original gate `hybrid F1 > current F1` mathematically unsatisfiable. A corpus derived only from passing tests cannot measure improvement.
 
-Metrics: true positives, false positives, false negatives, precision, recall, F1, plus a per-case diff list showing exactly which cases change verdict and in which direction. Output is a printed table and a committed `corpus.json` `results` block.
+So the corpus is extended with 8 positives harvested from a 32-pattern probe of realistic Nyaa release names — every pattern the pre-existing `matchEpisode` actually gets wrong — plus a matching set of negatives that guard each new branch against the false positives it invites. The negatives matter more than the positives here: widening episode patterns is exactly the kind of change that turns `[2024]` and `1080p` into episode numbers.
+
+`bench.js` loads `nyaa.js` into the restricted sandbox context and scores the single in-file `matchEpisode` over every case, printing true/false positives, true/false negatives, precision, recall, F1, and the id of every failing case. The A/B is therefore taken across commits: run the bench before the Part C change, record the number, change `matchEpisode`, run it again, compare. Both numbers go in the appendix. There is no second matcher and no flag, because there is no second matcher to compare against.
+
+Gate: precision 1.000, recall 1.000, F1 1.000, zero false negatives, zero false positives.
 
 ### 4.3 Stage 3 — live end-to-end
 
@@ -207,24 +219,25 @@ For each tracker set (current 10, +anime 4, +live best), test reachability of th
 
 ### 4.5 Success criteria (pre-committed)
 
-1. `hybrid` F1 > `current` F1 on the corpus.
-2. `hybrid` false negatives = 0 — no true positive is ever lost.
-3. Live streams per request not lower than baseline for any of the 15 requests.
+1. Corpus F1 = 1.000 on the extended corpus, with **zero false negatives and zero false positives**. The negatives are the load-bearing half: a recall win bought with a false positive is not a win.
+2. Pre-change F1 is strictly worse than post-change F1. If the hardened matcher does not move the number on the extended corpus, the change is reverted regardless of how reasonable it looks.
+3. Live streams per request not lower than baseline for any request.
 4. `url` / `infoHash` semantics unchanged; `seeders`, `size`, `quality` values identical to baseline for the same magnet.
 5. Magnet tracker count never exceeds 25.
-6. `test.js` offline suite still passes with Parts A and B on and Part C off.
+6. `test.js` offline suite still passes.
 
-If criterion 1 or 2 fails, Part C is removed from the design and A + B ship alone. That decision is data-driven, not deferred.
+Criterion 2 is what keeps this honest. The first draft of this spec used a strictly-greater F1 gate against a PTT matcher and would have failed on arithmetic alone; the criterion is now written so that "no measurable change" is a failure, not a pass.
 
 ## 5. Risks and rollback
 
 | Risk | Mitigation | Rollback |
 |---|---|---|
-| Vendored PTT bloats `nyaa.js` and confuses Hermes | C is flag-gated and off by default; corpus proves value before anyone enables it | Delete the vendored block and the selector line |
+| Widening the episode patterns creates false positives (`[2024]`, `1080p`, `x265` read as episodes) | Every new branch is anchored on a release-group dash form or an explicit `SxE` token; the corpus carries a negative for every widened branch | Revert the `matchEpisode` branch |
+| The corpus is derived from `test.js` and therefore only proves non-regression | Corpus extended with 8 probe-harvested positives and a matching negative set, so the pre-change matcher scores strictly worse than 1.000 | Extend the corpus further in a later spec |
 | More trackers lengthen magnet URIs; some clients truncate | Hard cap 25 with a documented priority order | Revert `buildMagnet()` tracker assembly |
 | Part B adds a boot-time network call | Lazy, once per process, in-flight shared, 5s timeout, silent fallback | Remove the `initBestTrackers()` call site |
 | Labels too long for narrow UIs | Fixed 4-line format with single-space fallback; measured on a real title set | Restore `name: item.title` |
-| Corpus too small to be conclusive | 15 requests x 3 matchers, committed so it grows over time | Corpus is additive; extend in later specs |
+| Corpus too small to be conclusive | Corpus is committed so it grows over time | Corpus is additive; extend in later specs |
 
 Each part is an isolated block. A, B, and C can be reverted independently, in any combination.
 
@@ -232,15 +245,16 @@ Each part is an isolated block. A, B, and C can be reverted independently, in an
 
 | File | Change |
 |---|---|
-| `nyaa-nuvio/nyaa.js` | Add `TRACKERS_ANIME`; add `initBestTrackers()` + lazy hook; add `mergeTrackers()` with 25 cap; rewrite tracker assembly in `buildMagnet()`; add `LANGUAGE_TAGS` + `detectAudioTags()` + `formatStreamName()`; add vendored PTT block + `matchEpisodePTT()`; add `USE_PTT` selector; set `name` via `formatStreamName()` |
-| `nyaa-nuvio/test.js` | Add cases for tracker cap, label formatting, language tags, PTT fallback-on-throw, and a guard that default mode still uses `matchEpisode` |
-| `nyaa-nuvio/bench.js` | New. Corpus runner, three matchers, metrics table, per-case diff |
-| `nyaa-nuvio/corpus.json` | New. 15+ frozen cases with expected verdicts, plus recorded results |
-| `nyaa-nuvio/manifest.json` | No functional change; bump `version` to `1.1.0` for the label/tracker release |
+| `nyaa-nuvio/nyaa.js` | Add `TRACKERS_ANIME`; add `initBestTrackers()` + lazy hook; add `mergeTrackers()` with 25 cap; rewrite tracker assembly in `buildMagnet()`; add `LANGUAGE_TAGS` + `detectAudioTags()` + `formatStreamName()`; harden four branches of `matchEpisode()` (4-digit absolute, `v2` suffix, parenthesised `Season N`, `S2 - E08`); set `name` via `formatStreamName()` |
+| `nyaa-nuvio/test.js` | Add cases for the tracker cap, label formatting, language tags, and each hardened matcher branch with its negative counterpart |
+| `nyaa-nuvio/bench.js` | New. Corpus runner, metrics table, failing-case list, `--gate` exit |
+| `nyaa-nuvio/corpus.json` | New. 20 regression cases from `test.js` plus 8 probe-harvested positives and their negative counterparts |
+| `nyaa-nuvio/tracker-health.js` | New. Stage 4 tracker reachability probe |
+| `nyaa-nuvio/manifest.json` | No functional change; bump `version` to `1.1.0` for the label/tracker/matcher release |
 
 ## 7. Decisions already made
 
-- Vendor full PTT source (option 1), not a partial re-implementation and not skipping it
-- Part C ships default-off; the flag decides at runtime
+- Part C is matcher hardening in `matchEpisode`, **not** a vendored `parse-torrent-title`. The PTT option was chosen, built, measured, and rejected on evidence; see 3.4. Its premise was that a general parser would recover releases the hand-rolled matcher misses. It does not, because the misses are bare-number shapes that a general parser deliberately refuses to guess at.
 - Debrid work is out of scope — the app already does it
 - No new npm dependencies; everything inlined into `nyaa.js`
+- The anime tracker set stays ahead of the live best trackers under the 25 cap — the best list alone can fill all 25 slots and evict the anime trackers, which are the point of Part A

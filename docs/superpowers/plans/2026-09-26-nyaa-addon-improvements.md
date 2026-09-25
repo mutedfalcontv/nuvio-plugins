@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add anime tracker support, Torrentio-style stream labels, live best-trackers, and a flag-gated `parse-torrent-title` matcher to `nyaa-nuvio`, with a committed corpus and A/B benchmark that proves whether each part actually helps.
+**Goal:** Add anime tracker support, Torrentio-style stream labels, live best trackers, and four targeted fixes to the episode matcher, with a committed corpus and before/after benchmark that proves each part actually helps.
 
-**Architecture:** Three independent, individually revertible blocks inside the single-file plugin `nyaa-nuvio/nyaa.js` (the runtime loads one file per scraper and provides no bundler, so nothing can be imported). Part C takes the union of the existing regex matcher and a vendored copy of `parse-torrent-title`, gated behind a `NYAA_PTT` global, so default behaviour is byte-identical to today. Measurement lives outside the plugin: `corpus.json` (frozen ground truth) plus `bench.js` (three matchers, precision/recall/F1) and `tracker-health.js` (Stage 4 probe).
+**Architecture:** Four independent, individually revertible blocks inside the single-file plugin `nyaa-nuvio/nyaa.js` (the runtime loads one file per scraper and provides no bundler, so nothing can be imported). Part C hardens the four branches of the existing `matchEpisode` that were measured to be wrong, rather than adding a competing matcher, so no previously-matching verdict can flip. Measurement lives outside the plugin: `corpus.json` (frozen ground truth) plus `bench.js` (single-matcher scorer with a hard gate) and `tracker-health.js` (Stage 4 probe).
 
-**Tech Stack:** JavaScript ES5-style CommonJS (Hermes-compatible, no optional chaining), Node `vm` for the offline test harness, `parse-torrent-title@3.0.1` vendored verbatim, Node `dgram`/`https` for tracker probes.
+**Tech Stack:** JavaScript ES5-style CommonJS (Hermes-compatible, no optional chaining), Node `vm` for the offline test harness, Node `dgram`/`https` for tracker probes.
 
 **Design spec:** `docs/superpowers/specs/2026-09-26-nyaa-addon-improvements-design.md`
+
+> **Superseded decision.** This plan originally vendored `parse-torrent-title@3.0.1` as a flag-gated second matcher. That was built and then measured, and it resolved **zero** of the 8 real matcher gaps — PTT has no bare-number handler, so every one of them fell back to `matchEpisode` anyway. Part C is now matcher hardening. See spec 3.4.
 
 **Ground rules for every task:**
 - The plugin is loaded by a `vm` context that only provides: `console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent, String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON, fetch, module, global`. **Do not use `parseFloat`, `Array.isArray`, `Object.assign`, template literals, or optional chaining in `nyaa.js`** — they will be `undefined` in the sandbox and in Hermes. Use `typeof x !== "undefined"` guards for any new global.
@@ -17,53 +19,61 @@
 
 ---
 
-### Task 1: Freeze the corpus and build the A/B benchmark
+### Task 1: Extend the corpus so it can actually detect improvement, and fix the bench gate
 
-Nothing else can be measured until a baseline exists. This task produces the numbers every later task is judged against, and it must land **first**.
+The 20 cases committed earlier were mirrored from `test.js`, which the pre-existing matcher already passes 10/10 (F1 1.000). That made the old gate `hybrid F1 > current F1` unsatisfiable — nothing beats 1.000 — and it meant the corpus could only ever prove non-regression. This task adds the discriminating cases and makes the gate reachable.
 
 **Files:**
-- Create: `nyaa-nuvio/corpus.json`
-- Create: `nyaa-nuvio/bench.js`
-- Modify: `nyaa-nuvio/test.js` (no change needed — `bench.js` is standalone)
+- Modify: `nyaa-nuvio/corpus.json` (append 22 cases)
+- Modify: `nyaa-nuvio/bench.js` (single matcher, honest gate)
 
-- [ ] **Step 1: Create `nyaa-nuvio/corpus.json`**
+- [ ] **Step 1: Append 9 positives to `corpus.json`**
 
-Every `expect` value below is the ground truth already asserted in `nyaa-nuvio/test.js:79-102`. Copy it exactly; do not invent new expectations.
+Every one of these is a real Nyaa release-name pattern that the current `matchEpisode` gets **wrong**. Insert them after case `20-ep239-not-s2` in the `cases` array:
 
 ```json
-{
-  "generatedAt": "2026-09-26",
-  "note": "Ground truth mirrors the assertions in test.js runOffline(). Do not edit expect values to make a matcher look good.",
-  "cases": [
-    { "id": "01-subsplease-s1-absolute", "title": "Super no Ura de Yani Suu Futari - 08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "02-subsplease-s1-absolute-bare", "title": "Super no Ura de Yani Suu Futari - 08", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "03-wrong-episode", "title": "Super no Ura de Yani Suu Futari - 09 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": false },
-    { "id": "04-explicit-s01e08", "title": "[SubsPlease] Show - S01E08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "05-sequel-batch-false-positive", "title": "[Erai-raws] Code Geass: Dakkan no Roze - 01 ~ 12 [1080p][BATCH][MultiSub]", "season": 1, "episode": 1, "absolute": null, "expect": false },
-    { "id": "06-generic-season-pack", "title": "Show - Season 1 Pack [1080p]", "season": 1, "episode": 8, "absolute": null, "expect": false },
-    { "id": "07-s2-absolute", "title": "[SubsPlease] Show S2 - 08 (1080p)", "season": 2, "episode": 8, "absolute": null, "expect": true },
-    { "id": "08-s1-absolute-plain", "title": "Show - 08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "09-season-mismatch", "title": "Show S1 - 08 (1080p)", "season": 2, "episode": 8, "absolute": null, "expect": false },
-    { "id": "10-spelled-season-reject", "title": "Solo Leveling Season 2 -Arise from the Shadow- - 08 [1080p]", "season": 1, "episode": 8, "absolute": null, "expect": false },
-    { "id": "11-s2-token-reject", "title": "[Raze] Solo Leveling S2 - 08 x265 1080p", "season": 1, "episode": 8, "absolute": 8, "expect": false },
-    { "id": "12-cross-season-absolute", "title": "[SubsPlease] Solo Leveling - 25 (1080p)", "season": 2, "episode": 13, "absolute": 25, "expect": true },
-    { "id": "13-absolute-unknown", "title": "[SubsPlease] Solo Leveling - 25 (1080p)", "season": 2, "episode": 13, "absolute": null, "expect": false },
-    { "id": "14-bracket-chain-ep08", "title": "[北宇治字幕组] 再见，菈菈 / Sayonara Lara [08][WebRip][HEVC_AAC][简日内嵌]", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "15-bracket-chain-wrong-ep", "title": "[北宇治字幕组] 再见，菈菈 / Sayonara Lara [08][WebRip][HEVC_AAC][简日内嵌]", "season": 1, "episode": 9, "absolute": null, "expect": false },
-    { "id": "16-bracket-chain-ep05", "title": "Show [05][1080p][HEVC] release", "season": 1, "episode": 5, "absolute": null, "expect": true },
-    { "id": "17-h264-not-an-episode", "title": "[ToonsHub] Grand Blue Dreaming S03E09 1080p AMZN WEB-DL DDP2.0 H.264 (Multi-Subs)", "season": 1, "episode": 264, "absolute": null, "expect": false },
-    { "id": "18-s03e09-real-match", "title": "[ToonsHub] Grand Blue Dreaming S03E09 1080p AMZN WEB-DL DDP2.0 H.264 (Multi-Subs)", "season": 3, "episode": 9, "absolute": null, "expect": true },
-    { "id": "19-ep239-s1", "title": "[Shridhuu][1080p] Swallowed Star - Tunshi Xingkong - EP239", "season": 1, "episode": 239, "absolute": null, "expect": true },
-    { "id": "20-ep239-not-s2", "title": "[Shridhuu][1080p] Swallowed Star - Tunshi Xingkong - EP239", "season": 2, "episode": 239, "absolute": null, "expect": false }
-  ]
-}
+    { "id": "21-abs-4digit-animatime", "title": "[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv", "season": 1, "episode": 1122, "absolute": null, "expect": true },
+    { "id": "22-abs-4digit-no-paren", "title": "[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]", "season": 1, "episode": 1123, "absolute": null, "expect": true },
+    { "id": "23-v2-suffix-subsplease", "title": "[SubsPlease] Show - 09v2 (1080p)", "season": 1, "episode": 9, "absolute": null, "expect": true },
+    { "id": "24-v2-suffix-doki", "title": "[Doki] Show - 08v2 (1080p) [HEVC-10bit]", "season": 1, "episode": 8, "absolute": null, "expect": true },
+    { "id": "25-v2-suffix-animatime", "title": "[Anime Time] Show - 12v2 (1080p)", "season": 1, "episode": 12, "absolute": null, "expect": true },
+    { "id": "26-v3-suffix", "title": "[Anime Time] Show - 12v3 (1080p)", "season": 1, "episode": 12, "absolute": null, "expect": true },
+    { "id": "27-abs-4digit-subsplease", "title": "[SubsPlease] One Piece - 1150 (1080p) [A1B2C3D4].mkv", "season": 1, "episode": 1150, "absolute": null, "expect": true },
+    { "id": "28-parenthesised-season", "title": "[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]", "season": 2, "episode": 13, "absolute": null, "expect": true },
+    { "id": "29-spaced-s2-e08", "title": "[EngSub] Show S2 - E08 (1080p)", "season": 2, "episode": 8, "absolute": null, "expect": true }
 ```
 
-- [ ] **Step 2: Create `nyaa-nuvio/bench.js`**
+- [ ] **Step 2: Append 13 negatives to `corpus.json`**
+
+Widening episode patterns is exactly the change that turns `[2024]`, `1080p` and `x265` into episode numbers. These are the load-bearing half of the corpus — each one guards a specific branch that Task 2 widens. Insert them after the last positive:
+
+```json
+    { "id": "30-neg-4digit-wrong-ep", "title": "[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv", "season": 1, "episode": 1123, "absolute": null, "expect": false },
+    { "id": "31-neg-4digit-season-2", "title": "[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv", "season": 2, "episode": 1122, "absolute": null, "expect": false },
+    { "id": "32-neg-v2-not-previous-ep", "title": "[SubsPlease] Show - 09v2 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": false },
+    { "id": "33-neg-v2-not-80", "title": "[Doki] Show - 08v2 (1080p) [HEVC-10bit]", "season": 1, "episode": 80, "absolute": null, "expect": false },
+    { "id": "34-neg-resolution-2160", "title": "[Group] Show S01E08 1080p 2160p HEVC x265", "season": 1, "episode": 2160, "absolute": null, "expect": false },
+    { "id": "35-neg-codec-265", "title": "[Group] Show S01E08 1080p x265 10bit", "season": 1, "episode": 265, "absolute": null, "expect": false },
+    { "id": "36-neg-year-in-parens", "title": "[Group] Movie (2024) [1080p] [x264]", "season": 1, "episode": 2024, "absolute": null, "expect": false },
+    { "id": "37-neg-year-after-dash", "title": "[Group] Show - 08 (2024) [1080p]", "season": 1, "episode": 2024, "absolute": null, "expect": false },
+    { "id": "38-neg-parenthesised-season-s1", "title": "[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]", "season": 1, "episode": 13, "absolute": null, "expect": false },
+    { "id": "39-neg-parenthesised-season-wrong-ep", "title": "[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]", "season": 2, "episode": 12, "absolute": null, "expect": false },
+    { "id": "40-neg-spaced-s2-not-s1", "title": "[EngSub] Show S2 - E08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": false },
+    { "id": "41-neg-spaced-s2-not-s3", "title": "[EngSub] Show S2 - E08 (1080p)", "season": 3, "episode": 8, "absolute": null, "expect": false },
+    { "id": "42-neg-batch-after-widening", "title": "[Erai-raws] Show - 01 ~ 12 [1080p][BATCH][Multi-Subs]", "season": 2, "episode": 5, "absolute": null, "expect": false }
+```
+
+- [ ] **Step 3: Replace `bench.js` with a single-matcher scorer**
+
+There is no second matcher any more, so the two-context harness and the three-row table go away. The A/B is now taken across commits: run the bench, record the number, change `matchEpisode`, run it again, compare.
 
 ```javascript
-// A/B benchmark for the nyaa matcher. Run:  node nyaa-nuvio/bench.js
-// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 if the ship criteria fail)
+// Corpus scorer for the nyaa matcher. Run:  node nyaa-nuvio/bench.js
+// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 if precision or recall < 1.0)
+//
+// Scores the single in-file matchEpisode(). The before/after comparison is taken
+// across commits, not across matchers: record this output, make the change, run
+// it again, diff the numbers.
 const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
@@ -71,123 +81,203 @@ const path = require("path");
 const SRC = fs.readFileSync(path.join(__dirname, "nyaa.js"), "utf8");
 const CORPUS = JSON.parse(fs.readFileSync(path.join(__dirname, "corpus.json"), "utf8"));
 
-// Same restricted context as test.js, plus injectable globals (NYAA_PTT).
-function loadCtx(extraGlobals) {
-  const ctx = {
-    console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent,
-    String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON,
-    fetch: function () { return Promise.reject(new Error("offline")); },
-    module: { exports: {} },
-    global: {}
-  };
-  if (extraGlobals) {
-    for (const k in extraGlobals) ctx[k] = extraGlobals[k];
+// Mirrors the restricted context Nuvio hands the plugin, so the bench measures
+// the same code path the real runtime executes.
+const ctx = {
+  console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent,
+  String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON,
+  fetch: function () { return Promise.reject(new Error("offline")); },
+  module: { exports: {} },
+  global: {}
+};
+vm.createContext(ctx);
+vm.runInContext(SRC, ctx);
+
+if (typeof ctx.matchEpisode !== "function") {
+  console.error("matchEpisode is not exposed by nyaa.js - cannot score");
+  process.exit(2);
+}
+
+let tp = 0, fp = 0, fn = 0, tn = 0;
+const missed = [], falsePositives = [];
+
+for (const c of CORPUS.cases) {
+  let got;
+  try {
+    got = ctx.matchEpisode(c.title, c.season, c.episode, c.absolute) === true;
+  } catch (e) {
+    got = false;
+    falsePositives.push(c.id + " (threw: " + (e.message || e) + ")");
   }
-  vm.createContext(ctx);
-  vm.runInContext(SRC, ctx);
-  return ctx;
+  if (c.expect && got) tp++;
+  else if (!c.expect && got) { fp++; falsePositives.push(c.id + " matched but should be rejected"); }
+  else if (c.expect && !got) { fn++; missed.push(c.id); }
+  else tn++;
 }
 
-const ctxDefault = loadCtx(null);
-const ctxPtt = loadCtx({ NYAA_PTT: "1" });
+const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+const f1 = precision + recall === 0 ? 0 : 2 * precision * recall / (precision + recall);
 
-function matchers() {
-  return {
-    current: function (c, t) { return c.matchEpisode(t.title, t.season, t.episode, t.absolute) === true; },
-    ptt: function (c, t) {
-      if (typeof c.matchEpisodePTT !== "function") return false;
-      return c.matchEpisodePTT(t.title, t.season, t.episode, t.absolute) === true;
-    },
-    hybrid: function (c, t) {
-      const a = c.matchEpisode(t.title, t.season, t.episode, t.absolute) === true;
-      if (a) return true;
-      if (typeof c.matchEpisodePTT !== "function") return false;
-      return c.matchEpisodePTT(t.title, t.season, t.episode, t.absolute) === true;
-    }
-  };
+console.log("cases " + CORPUS.cases.length + "   (positives " + (tp + fn) + ", negatives " + (fp + tn) + ")");
+console.log("TP " + tp + "  FP " + fp + "  FN " + fn + "  TN " + tn);
+console.log("precision " + precision.toFixed(3) + "   recall " + recall.toFixed(3) + "   F1 " + f1.toFixed(3));
+
+if (missed.length) {
+  console.log("\nfalse negatives (" + missed.length + ") - real releases we failed to match:");
+  for (const id of missed) console.log("  " + id);
+}
+if (falsePositives.length) {
+  console.log("\nfalse positives (" + falsePositives.length + ") - things we matched that must not match:");
+  for (const s of falsePositives) console.log("  " + s);
 }
 
-function score(fn) {
-  let tp = 0, fp = 0, fn = 0, tn = 0;
-  const wrong = [];
-  for (const c of CORPUS.cases) {
-    const got = fn(c);
-    if (c.expect && got) tp++;
-    else if (!c.expect && got) { fp++; wrong.push(c.id + " (expected reject, matched)"); }
-    else if (c.expect && !got) { fn++; wrong.push(c.id + " (expected match, missed)"); }
-    else tn++;
-  }
-  const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
-  const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
-  const f1 = precision + recall === 0 ? 0 : 2 * precision * recall / (precision + recall);
-  return { tp, fp, fn, tn, precision, recall, f1, wrong };
-}
+const ok = precision === 1 && recall === 1;
+console.log("\n" + (ok
+  ? "GATE PASS: precision 1.000, recall 1.000, zero false negatives, zero false positives"
+  : "GATE FAIL: precision " + precision.toFixed(3) + ", recall " + recall.toFixed(3) +
+    ", FN " + fn + ", FP " + fp));
 
-const m = matchers();
-const results = {};
-for (const name of ["current", "ptt", "hybrid"]) {
-  results[name] = score(m[name]);
-}
-
-const pad = (s, n) => String(s) + new Array(Math.max(1, n - String(s).length)).join(" ");
-console.log("matcher    TP  FP  FN  TN   precision   recall       F1");
-for (const name of ["current", "ptt", "hybrid"]) {
-  const r = results[name];
-  console.log(
-    pad(name, 10) + pad(r.tp, 4) + pad(r.fp, 4) + pad(r.fn, 4) + pad(r.tn, 4) +
-    pad(r.precision.toFixed(3), 13) + pad(r.recall.toFixed(3), 12) + r.f1.toFixed(3)
-  );
-}
-
-console.log("\nverdict changes vs current:");
-const base = {};
-for (const c of CORPUS.cases) base[c.id] = m.current(ctxDefault, c);
-for (const name of ["ptt", "hybrid"]) {
-  const changes = [];
-  for (const c of CORPUS.cases) {
-    const got = m[name](ctxPtt, c);
-    if (got !== base[c.id]) changes.push(c.id + ": " + base[c.id] + " -> " + got);
-  }
-  console.log("  " + name + ": " + (changes.length ? changes.join(" | ") : "no verdict changes"));
-}
-
-if (results.hybrid.f1 > results.current.f1 && results.hybrid.fn === 0) {
-  console.log("\nGATE PASS: hybrid F1 > current F1 and zero false negatives");
-} else {
-  console.log("\nGATE FAIL: hybrid F1=" + results.hybrid.f1.toFixed(3) +
-    " current F1=" + results.current.f1.toFixed(3) + " hybrid FN=" + results.hybrid.fn);
-}
-
-if (process.argv.indexOf("--gate") !== -1) {
-  const ok = results.hybrid.f1 > results.current.f1 && results.hybrid.fn === 0;
-  process.exit(ok ? 0 : 1);
-}
+if (process.argv.indexOf("--gate") !== -1) process.exit(ok ? 0 : 1);
 ```
 
-- [ ] **Step 3: Run the benchmark to establish the baseline**
+- [ ] **Step 4: Record the BEFORE score**
 
 Run: `node nyaa-nuvio/bench.js`
-Expected: `ptt` row shows all zeros (no `matchEpisodePTT` yet), `current` row shows the true baseline, and the gate line prints `GATE FAIL` because `hybrid` is currently identical to `current` (equal F1, not greater). **Record the `current` precision/recall/F1 numbers — you will compare against them in Task 6.**
+Expected: **exactly 9 false negatives** (ids `21` through `29`), **0 false positives**, recall well below 1.000. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 3.
 
-- [ ] **Step 4: Commit**
+If you see any false positive, stop and report it: that means the pre-existing matcher is already wrong about something the corpus assumed, and the `expect` value needs a decision, not a code change.
+
+- [ ] **Step 5: Confirm the existing suite is still green**
+
+Run: `node nyaa-nuvio/test.js`
+Expected: `ALL TESTS PASSED`, exit 0. You changed only measurement files.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add nyaa-nuvio/corpus.json nyaa-nuvio/bench.js
-git commit -m "test(nyaa): freeze 20-case matcher corpus + A/B bench harness"
+git commit -m "test(nyaa): add probe-harvested cases so the corpus can detect improvement"
 ```
 
 ---
 
-### Task 2: Part A1 — anime tracker set with a hard 25-tracker cap
+### Task 2: Part C — harden the four branches of `matchEpisode` that are measurably wrong
+
+Every change here widens an existing branch. None of them may cause a previously-passing case to fail, which is why Task 1's negatives exist.
+
+**Files:**
+- Modify: `nyaa-nuvio/nyaa.js` (pattern constants near `nyaa.js:20-60`, logic in `matchEpisode` at `nyaa.js:492-596`)
+- Modify: `nyaa-nuvio/test.js` (new assertions)
+
+- [ ] **Step 1: Write the failing tests**
+
+Append these inside `runOffline()` in `nyaa-nuvio/test.js`, immediately before the `return ctx.getStreams(...)` line:
+
+```javascript
+  // ---- Part C: hardened matcher branches ----
+  assert("4-digit absolute dash form",
+    ctx.matchEpisode("[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv", 1, 1122, null) === true);
+  assert("4-digit dash form, no parens",
+    ctx.matchEpisode("[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]", 1, 1123, null) === true);
+  assert("v2 revision suffix",
+    ctx.matchEpisode("[SubsPlease] Show - 09v2 (1080p)", 1, 9, null) === true);
+  assert("v3 revision suffix",
+    ctx.matchEpisode("[Anime Time] Show - 12v3 (1080p)", 1, 12, null) === true);
+  assert("parenthesised Season N",
+    ctx.matchEpisode("[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]", 2, 13, null) === true);
+  assert("spaced S2 - E08 form",
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 2, 8, null) === true);
+
+  // Guards. Each of these is a way the widened branches could go wrong.
+  assert("guard: resolution is not an episode",
+    ctx.matchEpisode("[Group] Show S01E08 1080p 2160p HEVC x265", 1, 2160, null) === false);
+  assert("guard: codec number is not an episode",
+    ctx.matchEpisode("[Group] Show S01E08 1080p x265 10bit", 1, 265, null) === false);
+  assert("guard: year is not an episode",
+    ctx.matchEpisode("[Group] Movie (2024) [1080p] [x264]", 1, 2024, null) === false);
+  assert("guard: v2 suffix does not shift the episode",
+    ctx.matchEpisode("[SubsPlease] Show - 09v2 (1080p)", 1, 8, null) === false);
+  assert("guard: v2 suffix does not concatenate to 80",
+    ctx.matchEpisode("[Doki] Show - 08v2 (1080p) [HEVC-10bit]", 1, 80, null) === false);
+  assert("guard: parenthesised season still blocks S1",
+    ctx.matchEpisode("[Judas] Show (Season 2) - 13 [1080p]", 1, 13, null) === false);
+  assert("guard: spaced S2 - E08 does not match S1 or S3",
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 1, 8, null) === false &&
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 3, 8, null) === false);
+  assert("guard: batch still rejected after widening",
+    ctx.matchEpisode("[Erai-raws] Show - 01 ~ 12 [1080p][BATCH][Multi-Subs]", 2, 5, null) === false);
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `node nyaa-nuvio/test.js`
+Expected: FAIL. The 6 positive assertions fail; the 8 guard assertions pass. If any guard fails **before** you change anything, stop and report — that is a pre-existing bug, not something this task should absorb silently.
+
+- [ ] **Step 3: Fix the dash-episode pattern (4-digit + revision suffix)**
+
+Find `DASH_EP_PATTERN` in the constants block near the top of `nyaa.js`. It currently matches 1-2 digits followed by a non-alphanumeric boundary. Widen it to 1-4 digits and allow an optional `v2`/`v3` revision suffix, so long-running series and re-encoded re-releases resolve:
+
+```javascript
+// Group dash form: "- 08", "- 08v2", "- 1122". 1-4 digits covers long-running
+// series (One Piece E1122); the trailing \w* boundary absorbs the v2/v3
+// revision suffix so a re-encode of the same episode still matches.
+var DASH_EP_PATTERN = /-\s+(\d{1,4})\s*(?:v\d+)?(?![0-9a-z])/i;
+```
+
+- [ ] **Step 4: Fix the season-token pattern (parenthesised `Season N`)**
+
+Find `SEASON_TOKEN_PATTERN`. It currently matches bare `S2` and `Season 2`, so `(Season 2)` slips through and the dash branch then treats the number as season-relative to an unknown season. Tolerate surrounding brackets:
+
+```javascript
+// S2 / S02 / Season 2 / (Season 2) / [Season 2]. The bracket tolerance matters
+// because release groups routinely parenthesise the season: "Show (Season 2) - 13".
+var SEASON_TOKEN_PATTERN = /(?:\bS(\d{1,2})\b|\b(?:Season|Saison)[.\s_-]?(\d{1,2})\b)/i;
+```
+
+Group 1 is the `S2` form, group 2 the spelled form — the existing `parseInt(seasonInTitle[1] || seasonInTitle[2], 10)` call site already handles both, so no call-site change is needed. Confirm that by reading the usage before you edit.
+
+- [ ] **Step 5: Add the spaced `S2 - E08` pattern**
+
+Add a new entry to the `EPISODE_PATTERNS` array. It must declare its season group, otherwise the season-less guard at `nyaa.js:533-539` will reject every non-S1 request:
+
+```javascript
+  { re: /\bS(\d{1,2})\s*-\s*E(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 }
+```
+
+The existing loop reads `pat.seasonGroup` and `pat.epGroup` and requires season equality when `seasonGroup !== null`, so no loop change is required.
+
+- [ ] **Step 6: Run the tests**
+
+Run: `node nyaa-nuvio/test.js`
+Expected: `ALL TESTS PASSED`, exit 0.
+
+- [ ] **Step 7: Run the corpus gate**
+
+Run: `node nyaa-nuvio/bench.js`
+Expected: `GATE PASS`, 0 false negatives, 0 false positives, precision 1.000, recall 1.000.
+
+**This is the decision point.** If the gate does not pass, do not proceed. Read the printed false-positive list, find which widened branch is over-matching, and tighten that branch. If you cannot make it pass without weakening a guard assertion, report BLOCKED with the specific case and the two conflicting requirements.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add nyaa-nuvio/nyaa.js nyaa-nuvio/test.js
+git commit -m "fix(nyaa): match 4-digit absolute, v2 revisions, (Season N) and S2 - E08"
+```
+
+---
+
+### Task 3: Part A1 — anime tracker set with a hard 25-tracker cap
 
 **Files:**
 - Modify: `nyaa-nuvio/nyaa.js:1-12` (add `TRACKERS_ANIME`, `MAX_TRACKERS`, `mergeTrackers`)
 - Modify: `nyaa-nuvio/nyaa.js:608-615` (`buildMagnet` uses `mergeTrackers`)
-- Modify: `nyaa-nuvio/test.js` (new assertions at end of `runOffline`)
+- Modify: `nyaa-nuvio/test.js` (new assertions)
 
 - [ ] **Step 1: Write the failing test**
 
-Append these lines inside `runOffline()` in `nyaa-nuvio/test.js`, immediately before the `return ctx.getStreams(...)` line (currently `nyaa-nuvio/test.js:113`):
+Insert these inside `runOffline()` in `nyaa-nuvio/test.js`, immediately before the `return ctx.getStreams(...)` line:
 
 ```javascript
   // ---- Part A1: tracker merge ----
@@ -218,7 +308,7 @@ Append these lines inside `runOffline()` in `nyaa-nuvio/test.js`, immediately be
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `node nyaa-nuvio/test.js`
-Expected: FAIL on `mergeTrackers includes all 4 anime trackers` — `ctx.mergeTrackers` is not a function, so the script throws `TypeError: ctx.mergeTrackers is not a function` and exits non-zero.
+Expected: FAIL — `ctx.mergeTrackers is not a function`, non-zero exit.
 
 - [ ] **Step 3: Implement `mergeTrackers`**
 
@@ -276,26 +366,26 @@ function buildMagnet(infoHash, title) {
 }
 ```
 
-`getBestTrackers()` is added in Task 4. Until then it must already exist as a stub so this task is runnable — add it now, above `buildMagnet`:
+`getBestTrackers()` arrives in Task 5. Add the stub now so this task is runnable:
 
 ```javascript
+var bestTrackersCache = null;
+
 // Returns the live best-tracker list if it has been fetched, otherwise an empty
-// list. Populated by initBestTrackers() (see below); the stub keeps buildMagnet
+// list. Populated by initBestTrackers() in Task 5; the stub keeps buildMagnet
 // correct before that fetch lands.
 function getBestTrackers() {
   return bestTrackersCache || [];
 }
-
-var bestTrackersCache = null;
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests**
 
 Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`, exit 0.
 
 Run: `node nyaa-nuvio/bench.js`
-Expected: `current` F1 unchanged from the Task 1 baseline. Trackers must not alter matching.
+Expected: `GATE PASS` still. Trackers must not touch matching.
 
 - [ ] **Step 6: Commit**
 
@@ -306,10 +396,10 @@ git commit -m "feat(nyaa): add anime tracker set with 25-tracker cap"
 
 ---
 
-### Task 3: Part A2 — Torrentio-style stream labels
+### Task 4: Part A2 — Torrentio-style stream labels
 
 **Files:**
-- Modify: `nyaa-nuvio/nyaa.js` (add `LANGUAGE_TAGS`, `detectAudioTags`, `formatStreamName` after `parseQuality` at `nyaa.js:598-606`)
+- Modify: `nyaa-nuvio/nyaa.js` (add `LANGUAGE_TAGS`, `detectAudioTags`, `formatStreamName` after `parseQuality`)
 - Modify: `nyaa-nuvio/nyaa.js:219-232` (result object uses `formatStreamName`)
 - Modify: `nyaa-nuvio/test.js` (new assertions)
 
@@ -352,12 +442,10 @@ Expected: FAIL — `ctx.detectAudioTags is not a function`.
 
 - [ ] **Step 3: Implement the label helpers**
 
-Insert after `parseQuality()` (`nyaa-nuvio/nyaa.js:606`):
+Insert after `parseQuality()`:
 
 ```javascript
 // Audio/subtitle tags, in Torrentio's vocabulary (addon/lib/languages.js).
-// Deliberately independent of parse-torrent-title: Part C is flag-gated and
-// labels must work with it off.
 var LANGUAGE_TAGS = [
   { re: /\bmulti[\s-]?subs?\b|\bmultiple[\s-]?sub(?:title)?s?\b/i, label: "Multi Subs" },
   { re: /\bmulti[\s-]?audio\b/i, label: "Multi Audio" },
@@ -389,9 +477,11 @@ function formatStreamName(item, quality, tags) {
 }
 ```
 
+**Sandbox warning:** `\u{1F50A}` is ES6 code-point escape syntax. If Hermes rejects it, fall back to the surrogate pair `"\uD83D\uDCA9"` and `"\uD83D\uDCBF"`. Verify with `node nyaa-nuvio/test.js` — the assertion only checks that the seeders and size appear on line 3, so it will pass either way, but confirm the file loads in the vm context.
+
 - [ ] **Step 4: Use it in the result object**
 
-In `getStreams`, replace `nyaa-nuvio/nyaa.js:219-232`'s `var quality = ...` / `name: item.title` usage so the pushed result reads:
+In `getStreams`, the pushed result should read:
 
 ```javascript
           var quality = parseQuality(item.title);
@@ -411,12 +501,15 @@ In `getStreams`, replace `nyaa-nuvio/nyaa.js:219-232`'s `var quality = ...` / `n
           });
 ```
 
-`title` stays the raw torrent title on purpose: the existing integration test at `nyaa-nuvio/test.js:116` greps `r.title` for `SubsPlease`, and the app may key off it.
+`title` stays the raw torrent title on purpose: the existing integration test greps `r.title` for `SubsPlease`, and the app may key off it.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests**
 
 Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`, exit 0.
+
+Run: `node nyaa-nuvio/bench.js`
+Expected: `GATE PASS` still.
 
 - [ ] **Step 6: Commit**
 
@@ -427,10 +520,10 @@ git commit -m "feat(nyaa): Torrentio-style stream labels with audio/sub tags"
 
 ---
 
-### Task 4: Part B — live best trackers
+### Task 5: Part B — live best trackers
 
 **Files:**
-- Modify: `nyaa-nuvio/nyaa.js` (add `BEST_TRACKERS_URL`, `initBestTrackers`, next to the `getBestTrackers` stub from Task 2)
+- Modify: `nyaa-nuvio/nyaa.js` (replace the `getBestTrackers` stub from Task 3 with the real loader)
 - Modify: `nyaa-nuvio/nyaa.js:152-154` (`getStreams` fires the fetch, does not await it)
 - Modify: `nyaa-nuvio/test.js` (new assertions)
 
@@ -440,7 +533,7 @@ Insert before the `return ctx.getStreams(...)` line in `runOffline()`:
 
 ```javascript
   // ---- Part B: live best trackers ----
-  assert("getBestTrackers defaults to empty before fetch", Array.isArray(ctx.getBestTrackers()) && ctx.getBestTrackers().length === 0);
+  assert("getBestTrackers defaults to empty before fetch", ctx.getBestTrackers().length === 0);
   return ctx.initBestTrackers().then(function () {
     var best = ctx.getBestTrackers();
     assert("initBestTrackers parses tracker lines", best.length === 2);
@@ -459,7 +552,7 @@ Insert before the `return ctx.getStreams(...)` line in `runOffline()`:
   });
 ```
 
-Then delete the old three-line integration block immediately above it (currently `nyaa-nuvio/test.js:113-120`) so the mocked-fetch assertions run after the tracker fetch. The `fakeFetch` in `test.js:53` must also serve the tracker URL — add as the **first** branch:
+Then delete the old integration block immediately above it (the three lines ending in the `return` of `runOffline`) so these assertions run after the tracker fetch. The `fakeFetch` helper in `test.js` must also serve the tracker URL — add as the **first** branch:
 
 ```javascript
   function fakeFetch(url) {
@@ -482,7 +575,7 @@ Expected: FAIL — `ctx.initBestTrackers is not a function`.
 
 - [ ] **Step 3: Implement the fetch**
 
-Replace the `getBestTrackers` stub added in Task 2 with:
+Replace the Task 3 stub with:
 
 ```javascript
 var BEST_TRACKERS_URL = "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt";
@@ -534,7 +627,7 @@ function initBestTrackers() {
 
 - [ ] **Step 4: Fire it without blocking `getStreams`**
 
-At the top of `getStreams` (`nyaa-nuvio/nyaa.js:152`), as the first statement inside the function:
+As the first statement inside `getStreams` (`nyaa-nuvio/nyaa.js:152`):
 
 ```javascript
   // Warm the tracker list in the background. Never awaited: a slow or dead
@@ -542,7 +635,7 @@ At the top of `getStreams` (`nyaa-nuvio/nyaa.js:152`), as the first statement in
   try { initBestTrackers(); } catch (e) { /* best effort */ }
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests**
 
 Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`, exit 0.
@@ -552,7 +645,7 @@ Expected: `ALL TESTS PASSED`, exit 0.
 Temporarily point `BEST_TRACKERS_URL` at an unreachable host, run `node nyaa-nuvio/test.js`, confirm `best trackers fetch failed:` is logged and the suite still passes, then restore the URL.
 
 Run: `node nyaa-nuvio/bench.js`
-Expected: `current` F1 identical to the Task 1 baseline.
+Expected: `GATE PASS` still.
 
 - [ ] **Step 7: Commit**
 
@@ -563,341 +656,10 @@ git commit -m "feat(nyaa): fetch live best trackers once per process with static
 
 ---
 
-### Task 5: Part C — vendored `parse-torrent-title`, default off
-
-Read the probe output in Step 4 before writing the matcher. `parse-torrent-title` **has no handler for the SubsPlease bare `- 08` form** — it returns `season` but no `episode` for `S4 - 14` and `Season 2 - 08`. That is exactly why Part C must union with the existing matcher rather than replace it.
-
-**Files:**
-- Modify: `nyaa-nuvio/nyaa.js` (vendored PTT block, `USE_PTT`, `matchEpisodePTT`, call-site change at `nyaa-nuvio/nyaa.js:214`)
-- Modify: `nyaa-nuvio/test.js` (new assertions)
-- Create: `nyaa-nuvio/bench.js` already gates this (Task 1)
-
-- [ ] **Step 1: Write the failing test**
-
-Insert before the tracker assertions from Task 4 in `runOffline()`:
-
-```javascript
-  // ---- Part C: parse-torrent-title ----
-  assert("PTT namespace is exposed", ctx.PTT && typeof ctx.PTT.parse === "function");
-  var pttSxe = ctx.PTT.parse("[DKB] Tensei shitara Slime Datta Ken - S04E14 [1080p][HEVC x265 10bit][Multi-Subs][weekly]");
-  assert("PTT reads season 4", pttSxe.season === 4);
-  assert("PTT reads episode 14", pttSxe.episode === 14);
-  var pttBare = ctx.PTT.parse("[SubsPlease] Sousou no Frieren - 08 (1080p) [ABCD1234].mkv");
-  assert("PTT finds no episode for bare '- 08' form", pttBare.episode === undefined);
-
-  assert("matchEpisodePTT matches S04E14", ctx.matchEpisodePTT("Tensei shitara Slime Datta Ken - S04E14 [1080p]", 4, 14, null) === true);
-  assert("matchEpisodePTT rejects wrong episode", ctx.matchEpisodePTT("Tensei shitara Slime Datta Ken - S04E14 [1080p]", 4, 15, null) === false);
-  assert("matchEpisodePTT rejects wrong season", ctx.matchEpisodePTT("Tensei shitara Slime Datta Ken - S04E14 [1080p]", 3, 14, null) === false);
-  assert("matchEpisodePTT delegates bare dash form to matchEpisode",
-    ctx.matchEpisodePTT("Super no Ura de Yani Suu Futari - 08 (1080p)", 1, 8, null) === true);
-  assert("matchEpisodePTT survives a malformed title",
-    ctx.matchEpisodePTT("]]]]", 1, 8, null) === false);
-  assert("USE_PTT is false by default", ctx.USE_PTT === false);
-```
-
-And add a gated-path test at the end of `runOffline`, before the final return:
-
-```javascript
-    var gated = ctx.getStreams("122991", "tv", 1, 8).then(function (r) {
-      assert("default run still returns formatted names", r.length > 0 && r[0].name.split("\n").length === 4);
-    });
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `node nyaa-nuvio/test.js`
-Expected: FAIL — `ctx.PTT` is undefined.
-
-- [ ] **Step 3: Vendor `parse-torrent-title` into `nyaa.js`**
-
-The vendored block is upstream source, unmodified except for the CommonJS wrapper. Insert near the top of `nyaa-nuvio/nyaa.js`, after the `MAX_STREAMS` declaration:
-
-```javascript
-// ---------------------------------------------------------------------------
-// parse-torrent-title@3.0.1 — vendored verbatim from
-// https://registry.npmjs.org/parse-torrent-title/-/parse-torrent-title-3.0.1.tgz
-// Retrieved 2026-09-26. Upstream is ISC licensed (see LICENSE in the tarball).
-// The plugin runtime loads a single file with no bundler, so this cannot be a
-// dependency. Upstream internals are unmodified; only the CommonJS
-// require/exports wrapper is replaced by this IIFE.
-// ---------------------------------------------------------------------------
-var PTT = (function () {
-  function extendOptions(options) {
-    options = options || {};
-    var defaultOptions = { skipIfAlreadyFound: false, type: "string" };
-    options.skipIfAlreadyFound = options.skipIfAlreadyFound || defaultOptions.skipIfAlreadyFound;
-    options.type = options.type || defaultOptions.type;
-    return options;
-  }
-
-  function createHandlerFromRegExp(name, regExp, options) {
-    var transformer;
-    if (!options.type) transformer = function (input) { return input; };
-    else if (options.type.toLowerCase() === "lowercase") transformer = function (input) { return input.toLowerCase(); };
-    else if (options.type.toLowerCase().slice(0, 4) === "bool") transformer = function () { return true; };
-    else if (options.type.toLowerCase().slice(0, 3) === "int") transformer = function (input) { return parseInt(input, 10); };
-    else if (options.type.toLowerCase().slice(0, 5) === "float") transformer = function (input) { return parseFloat(input); };
-    else transformer = function (input) { return input; };
-
-    function handler(opts) {
-      var title = opts.title, result = opts.result;
-      if (result[name] && options.skipIfAlreadyFound) return null;
-      var match = title.match(regExp);
-      var rawMatch = match ? match[0] : undefined;
-      var cleanMatch = match ? match[1] : undefined;
-      if (rawMatch) {
-        var value = options.value || transformer(cleanMatch || rawMatch);
-        if (!options.skipIfAlreadyFound && name in result && result[name] !== value) {
-          result[name + "list"] = (result[name + "list"] || []).concat([result[name], value]);
-        }
-        if (!(name in result)) result[name] = value;
-        return match.index;
-      }
-      return null;
-    }
-    handler.handlerName = name;
-    return handler;
-  }
-
-  function cleanTitle(rawTitle) {
-    var cleanedTitle = rawTitle.replace(/^\.+|\.+$/g, "");
-    if (cleanedTitle.indexOf(" ") === -1 && cleanedTitle.indexOf(".") !== -1) {
-      cleanedTitle = cleanedTitle.replace(/\./g, " ");
-    }
-    cleanedTitle = cleanedTitle.replace(/_/g, " ");
-    cleanedTitle = cleanedTitle.replace(/([(_]|- )$/, "").replace(/^\s+|\s+$/g, "");
-    return cleanedTitle;
-  }
-
-  function Parser() { this.handlers = []; }
-
-  Parser.prototype.addHandler = function (handlerName, handler, options) {
-    if (typeof handler === "undefined" && typeof handlerName === "function") {
-      handler = handlerName; handler.handlerName = "unknown";
-    } else if (typeof handlerName === "string" && handler instanceof RegExp) {
-      options = extendOptions(options);
-      handler = createHandlerFromRegExp(handlerName, handler, options);
-    } else if (typeof handler === "function") {
-      handler.handlerName = handlerName;
-    } else {
-      throw new Error("Handler for " + handlerName + " should be a RegExp or a function.");
-    }
-    this.handlers.push(handler);
-  };
-
-  Parser.prototype.parse = function (title) {
-    var result = {};
-    var endOfTitle = title.length;
-    for (var hi = 0; hi < this.handlers.length; hi++) {
-      var matchIndex = this.handlers[hi]({ title: title, result: result });
-      if (matchIndex && matchIndex < endOfTitle) endOfTitle = matchIndex;
-    }
-    result.title = cleanTitle(title.slice(0, endOfTitle));
-    return result;
-  };
-
-  function addDefaults(parser) {
-    parser.addHandler("year", /[^a-zA-Z0-9](?!^)[([]?((?:19[0-9]|20[012])[0-9])[)\]]?/, { type: "integer" });
-    parser.addHandler("resolution", /([0-9]{3,4}[pi])/i, { type: "lowercase" });
-    parser.addHandler("resolution", /\b(4k)/i, { type: "lowercase" });
-    parser.addHandler("extended", /EXTENDED(?:[\s.]CUT)?/i, { type: "boolean" });
-    parser.addHandler("theatrical", /Theatrical(?:[. ]Cut)?/, { type: "boolean" });
-    parser.addHandler("uncut", /.+\bUNCUT\b/i, { type: "boolean" });
-    parser.addHandler("openmatte", /OPEN[. ]MATTE/i, { type: "boolean" });
-    parser.addHandler("downscaled", /\bDS4K\b/i, { value: "4k" });
-    parser.addHandler("hybrid", /\bhybrid(\b|\d)/i, { type: "boolean" });
-    parser.addHandler("convert", /CONVERT/, { type: "boolean" });
-    parser.addHandler("hardcoded", /HC|HARDCODED/, { type: "boolean" });
-    parser.addHandler("remux", /REMUX/i, { type: "boolean" });
-    parser.addHandler("proper", /\b(?:REAL.)?PROPER\b/i, { type: "boolean" });
-    parser.addHandler("repack", /REPACK|RERIP/i, { type: "boolean" });
-    parser.addHandler("internal", /\b[iI]NTERNAL\b/, { type: "boolean" });
-    parser.addHandler("retail", /\bRetail\b/, { type: "boolean" });
-    parser.addHandler("remastered", /\bRemaster(?:ed)?\b/i, { type: "boolean" });
-    parser.addHandler("unrated", /\bunrated|uncensored\b/i, { type: "boolean" });
-    parser.addHandler("extras", /(?<=\b[12]\d{3}\b).*(\b|\.)\b(Extras?|Bonus|Extended[ ._-]Clip|Special Feature[s]?)\b/i, { type: "boolean" });
-    parser.addHandler("criterion", /\bCriterion\b/, { type: "boolean" });
-    parser.addHandler("region", /(?:\b|[Dd](?:vd|VD))(R[0-9])/);
-    parser.addHandler("container", /\b(MKV|AVI|MP4)\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\b(?:HD-?)?CAM\b/, { type: "lowercase" });
-    parser.addHandler("source", /\b(?:HD-?)?T(?:ELE)?S(?:YNC)?\b/i, { value: "telesync" });
-    parser.addHandler("source", /\bHD-?Rip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bBRRip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bBDRip|BluRayRip\b/i, { value: "bdrip" });
-    parser.addHandler("source", /\bDVDRip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bDVD(?:R[0-9])?\b/i, { value: "dvd" });
-    parser.addHandler("source", /\bDVDscr\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\b(?:HD-?)?TVRip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bTC\b/, { type: "lowercase" });
-    parser.addHandler("source", /\bPPVRip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bR5\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bVHSSCR\b/i, { type: "lowercase" });
-    parser.addHandler("source", /((?:\bBlu-?Ray)|((?:\b|\d)BR))\b/i, { value: "bluray" });
-    parser.addHandler("source", /\bWEB(?:-?DL)?\b(?!-?RIP)/i, { value: "web-dl" });
-    parser.addHandler("source", /\bWEB-?Rip\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\b(?:DL|WEB|BD|BR)MUX\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\b(DivX|XviD)\b/, { type: "lowercase" });
-    parser.addHandler("source", /HDTV/i, { type: "lowercase" });
-    parser.addHandler("source", /\bIMAX[. -]Enhanced\b/i, { value: "imax-enhanced" });
-    parser.addHandler("source", /\bIMAX\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bHDDVD\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bNTSC\b/i, { type: "lowercase" });
-    parser.addHandler("source", /\bPAL\b/i, { type: "lowercase" });
-    parser.addHandler("service", /\bAMZN|Amazon\b/i, { value: "AMZN" });
-    parser.addHandler("service", /\bH?MAX\b/, { value: "HMAX" });
-    parser.addHandler("service", /\b(?<!DTS-HD[\s\-\.])MA\b/i, { value: "MA" });
-    parser.addHandler("service", /\b(NFLX|NF|Netflix)\b/i, { value: "NFLX" });
-    parser.addHandler("service", /\biT(?:unes)\b/, { value: "iT" });
-    parser.addHandler("codec", /h[-. ]?265|hevc/i, { value: "h265" });
-    parser.addHandler("codec", /h[-. ]?264|avc/i, { value: "h264" });
-    parser.addHandler("codec", /dvix|mpeg2|divx|xvid|x[-. ]?26[45]/i, { type: "lowercase" });
-    parser.addHandler("codec", function (opts) {
-      if (opts.result.codec) opts.result.codec = opts.result.codec.replace(/[ .-]/, "");
-    });
-    parser.addHandler("color", /\bHDR(?:10)?\b/i, { value: "HDR" });
-    parser.addHandler("color", /\bSDR\b/i, { value: "SDR" });
-    parser.addHandler("color", /\b(?:DV|DoVi|Dolby\sVision)\b/i, { value: "DV" });
-    parser.addHandler("audio", /\bATMOS\b|DA\d/i, { value: "atmos" });
-    parser.addHandler("audio", /MD|MP3|mp3|FLAC|TrueHD/, { type: "lowercase" });
-    parser.addHandler("audio", /\bDD-EX(\b|\d)/i, { value: "dd-ex" });
-    parser.addHandler("audio", /\bDD(?:\+|P)|EAC-?3/i, { value: "ddp" });
-    parser.addHandler("audio", /\b(DD(?!-EX)(?:\b|\d)|AC-?3)/i, { value: "dd" });
-    parser.addHandler("audio", /AAC(?:[. ]?2[. ]?0)?/, { value: "aac" });
-    parser.addHandler("audio", /DTS-ES/, { type: "lowercase" });
-    parser.addHandler("audio", /DTS-HD[\s-.]?(MA|Master Audio)/, { value: "dts-hd-ma" });
-    parser.addHandler("audio", /DTS(?:[- ]?HD)/, { value: "dts-hd", skipIfAlreadyFound: true });
-    parser.addHandler("audio", /DTS/, { value: "dts", skipIfAlreadyFound: true });
-    parser.addHandler("channels", /\d+[.\s](?:1|0)\b/i);
-    parser.addHandler("channels", /2(?:ch)/, { value: 2.0 });
-    parser.addHandler("channels", /6(?:ch)/, { value: 5.1 });
-    parser.addHandler("channels", /8(?:ch)/, { value: 7.1 });
-    parser.addHandler("bitdepth", /\b(8|10|12|16|24)[-\s.]?bits?\b/i, { type: "integer" });
-    parser.addHandler("samplerate", /\b((?:\d+)(?:\.\d+)?)[-\s.]?kHz?\b/i, { type: "float" });
-    parser.addHandler("group", /-[ ([]*(?:\w+[ \][)]+)?(\w+(?:\.\w+)?(?<!\.mkv|\.mp4))[)\]]?(?:\.(?:mkv|mp4))?$/i);
-    parser.addHandler("season", /([0-9]{1,2})xall/i, { type: "integer" });
-    parser.addHandler("season", /S([0-9]{1,2}) ?E[0-9]{1,2}/i, { type: "integer" });
-    parser.addHandler("season", /([0-9]{1,2})x[0-9]{1,2}/, { type: "integer" });
-    parser.addHandler("season", /(?:Saison|Season)[. _-]?([0-9]{1,2})/i, { type: "integer" });
-    parser.addHandler("season", /\bS([0-9]{1,2})(?![0-9])/i, { type: "integer" });
-    parser.addHandler("episode", /S[0-9]{1,2} ?E([0-9]{1,5})/i, { type: "integer" });
-    parser.addHandler("episode", /[0-9]{1,2}x([0-9]{1,5})/, { type: "integer" });
-    parser.addHandler("episode", /[ée]p(?:isode)?[. _-]?([0-9]{1,5})/i, { type: "integer" });
-    parser.addHandler("language", /\bMULTi(?:Lang|-audio|-VF2)?\b/i, { value: "multi" });
-    parser.addHandler("language", /Dual(?:[- ]Audio)?|[ .]DL[ .]/i, { value: "dual" });
-    parser.addHandler("language", /\bDUBBED\b/, { type: "lowercase" });
-    parser.addHandler("language", /\bENG(?:LISH)?\b/i, { value: "eng" });
-    parser.addHandler("language", /\bJPN\b/i, { type: "lowercase" });
-    parser.addHandler("language", /\bITA(?:LIAN)?\b/, { value: "ita" });
-    parser.addHandler("language", /\bFR(?:ENCH)?\b/, { type: "lowercase" });
-  }
-
-  var defaultParser = new Parser();
-  addDefaults(defaultParser);
-
-  return {
-    parse: function (title) { return defaultParser.parse(title); },
-    addDefaults: addDefaults,
-    addHandler: function (name, handler, options) { defaultParser.addHandler(name, handler, options); },
-    Parser: Parser
-  };
-})();
-```
-
-I dropped upstream's per-service abbreviation handlers (`AUBC`, `ATVP`, `BNGE`, `DLWP`, `DSCP`, `DSNP`, `FDNG`, `HULU`, `NL`, `NORDiC`, `ViETNAM`, `FLEMISH`, `GERMAN`, `NORDIC`, `RoSubbed`, `Truefrench`, `VOST`, `RUS`, `UKR`, `encoder`) because this plugin only consumes `season`, `episode`, and `language`. **Verify this claim in Step 4** — if the benchmark shows a false positive that traces to a dropped handler, add that specific handler back.
-
-- [ ] **Step 4: Run a probe before writing the matcher**
-
-Run:
-
-```bash
-node -e "const vm=require('vm'),fs=require('vm'),p=require('path');const src=fs.readFileSync(p.join('nyaa-nuvio','nyaa.js'),'utf8');const ctx={console,setTimeout,clearTimeout,encodeURIComponent,decodeURIComponent,String,parseInt,isNaN,Math,Promise,RegExp,Object,Array,Error,JSON,fetch:()=>Promise.reject(new Error('x')),module:{exports:{}},global:{}};vm.createContext(ctx);vm.runInContext(src,ctx);['[SubsPlease] Sousou no Frieren - 08 (1080p) [ABCD1234].mkv','[SubsPlease] Tensei Shitara Slime Datta Ken S4 - 14 (1080p) [22959D06].mkv','[DKB] Tensei shitara Slime Datta Ken - S04E14 [1080p][HEVC x265 10bit][Multi-Subs][weekly]','[EMBER] Show Title S02E08 1080p WEB-DL AAC2.0 H.264-VARYG','[SubsPlease] Code Geass: Dakkan no Roze - 01 ~ 12 [BATCH]','[AniDL] Show [08][WebRip][HEVC_AAC]'].forEach(t=>console.log(JSON.stringify(ctx.PTT.parse(t)),' <= ',t));"
-```
-
-Expected: `{season:4, episode:14, ...}` for the S04E14 title, `{resolution:"1080p", container:"mkv"}` with **no** `episode` for the bare `- 08` title, and `{season:2, episode:8, ...}` for S02E08. If any of those differ, fix the vendored handlers before continuing.
-
-- [ ] **Step 5: Implement the matcher and the flag**
-
-Add next to the other episode-matching code, after `matchEpisode()` (`nyaa-nuvio/nyaa.js:596`):
-
-```javascript
-// Opt-in. Nuvio injects globals the same way it injects TMDB_API_KEY (nyaa.js:21).
-var USE_PTT = (typeof NYAA_PTT !== "undefined" && NYAA_PTT === "1");
-
-// Augments matchEpisode(); it never replaces it. parse-torrent-title has no
-// handler for the SubsPlease bare "- 08" absolute form (it returns a season but
-// no episode), so delegating the no-episode case to matchEpisode() is what keeps
-// this a strict superset of today's results.
-function matchEpisodePTT(title, requestedSeason, requestedEpisode, absoluteNumber) {
-  var reqEp = parseInt(requestedEpisode, 10);
-  var reqSeason = parseInt(requestedSeason, 10);
-  var abs = (absoluteNumber != null) ? parseInt(absoluteNumber, 10) : NaN;
-  if (isNaN(reqEp)) return false;
-
-  var parsed;
-  try {
-    parsed = PTT.parse(title);
-  } catch (e) {
-    console.error("PTT parse failed:", e.message || e);
-    return false;
-  }
-
-  if (parsed.season !== undefined && parsed.season !== reqSeason) return false;
-
-  if (parsed.episode !== undefined) {
-    if (parsed.episode === reqEp) return true;
-    if (!isNaN(abs) && parsed.episode === abs) return true;
-    return false;
-  }
-
-  return matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber);
-}
-```
-
-- [ ] **Step 6: Wire the union into the call site**
-
-At `nyaa-nuvio/nyaa.js:214`, replace:
-
-```javascript
-          var match = matchEpisode(item.title, season, episode, abs);
-```
-
-with:
-
-```javascript
-          var match = matchEpisode(item.title, season, episode, abs);
-          // Union, never replacement: the current matcher runs first and PTT only
-          // gets a say when it found nothing. Guarantees zero lost results.
-          if (!match && USE_PTT) match = matchEpisodePTT(item.title, season, episode, abs);
-```
-
-- [ ] **Step 7: Run the tests**
-
-Run: `node nyaa-nuvio/test.js`
-Expected: `ALL TESTS PASSED`, exit 0, including `USE_PTT is false by default`.
-
-- [ ] **Step 8: Run the gate**
-
-Run: `node nyaa-nuvio/bench.js --gate`
-Expected: a `current` / `ptt` / `hybrid` table, the verdict-change list, and either `GATE PASS` or `GATE FAIL`.
-
-**This is the decision point.** If `GATE FAIL`, Part C does not ship — record the numbers in the spec appendix, and do not flip `USE_PTT` on. If `GATE PASS`, continue to Task 6.
-
-Also run the default-mode check: `node nyaa-nuvio/bench.js` uses two contexts, one with `NYAA_PTT` unset. Confirm the `hybrid` row's false-negative count is `0` — that is the superset guarantee, and a non-zero value means Task 5 Step 6 is wrong.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add nyaa-nuvio/nyaa.js nyaa-nuvio/test.js
-git commit -m "feat(nyaa): vendored parse-torrent-title matcher, opt-in via NYAA_PTT"
-```
-
----
-
 ### Task 6: Measure the result and record the verdict
 
 **Files:**
 - Create: `nyaa-nuvio/tracker-health.js`
-- Modify: `nyaa-nuvio/nyaa.js` (use `getStreams` unchanged; nothing required)
 - Modify: `docs/superpowers/specs/2026-09-26-nyaa-addon-improvements-design.md` (results appendix)
 
 - [ ] **Step 1: Write `nyaa-nuvio/tracker-health.js`**
@@ -945,7 +707,6 @@ function probeUdp(url, timeoutMs) {
     };
     socket.on("error", function (e) { finish(false, e.code || e.message); });
     socket.on("message", function (msg) {
-      // 16-byte response, action id 0 = connect
       finish(msg.length >= 8 && msg.readUInt32BE(0) === 0, "action " + msg.readUInt32BE(0));
     });
     setTimeout(function () { finish(false, "timeout"); }, timeoutMs || 5000);
@@ -1002,24 +763,21 @@ Expected: a per-set reachable count. UDP probes may be blocked on some networks 
 - [ ] **Step 3: Run the live end-to-end comparison**
 
 Run: `LIVE=1 node nyaa-nuvio/test.js`
-Expected: `ALL TESTS PASSED` plus the live assertions. Record the per-title match counts printed by the `live old '...'` lines.
+Expected: `ALL TESTS PASSED` plus the live assertions. Record the per-title match counts.
 
 - [ ] **Step 4: Write the results appendix**
 
-Append to the design spec, replacing the placeholder-free structure below with the real numbers you collected:
+Append to the design spec, filling in the real numbers you collected. The BEFORE row is the Task 1 Step 4 output, the AFTER row is the Task 2 Step 7 output.
 
 ```markdown
 ## Appendix A — Measured results (2026-09-26)
 
-### A.1 Matcher A/B (Task 1 baseline vs Task 5)
+### A.1 Matcher before/after (Task 1 Step 4 vs Task 2 Step 7)
 
-| Matcher | TP | FP | FN | TN | Precision | Recall | F1 |
+| Stage | TP | FP | FN | TN | Precision | Recall | F1 |
 |---|---|---|---|---|---|---|---|
-| current (baseline) | | | | | | | |
-| ptt only | | | | | | | |
-| hybrid (shipped) | | | | | | | |
-
-Gate: hybrid F1 > current F1 AND hybrid FN = 0 -> PASS/FAIL
+| before hardening | | | | | | | |
+| after hardening | | | | | | | |
 
 ### A.2 Live end-to-end (Task 6 Step 3)
 
@@ -1033,15 +791,25 @@ Gate: hybrid F1 > current F1 AND hybrid FN = 0 -> PASS/FAIL
 
 ### A.4 Verdict
 
-State plainly whether Part C ships (gate pass) and whether the anime tracker set
-measurably helped. If a number is unavailable, say so instead of estimating.
+State plainly whether the four hardened branches moved the number, and whether
+the anime tracker set measurably helped. If a number is unavailable, say so
+instead of estimating.
+
+### A.5 Rejected: vendored parse-torrent-title
+
+Part C was originally specified as a vendored, flag-gated `parse-torrent-title@3.0.1`
+second matcher. It was built and measured against the 8 real matcher gaps and
+resolved none of them: PTT has no bare-number handler, so every case returned
+`season: undefined, episode: undefined` and would have fallen back to
+`matchEpisode()` regardless. The design was rewritten to harden the existing
+matcher instead. Roughly 200 vendored lines avoided.
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add nyaa-nuvio/tracker-health.js docs/superpowers/specs/2026-09-26-nyaa-addon-improvements-design.md
-git commit -m "test(nyaa): measure matcher A/B, live results, and tracker reachability"
+git commit -m "test(nyaa): measure matcher before/after, live results, tracker reachability"
 ```
 
 ---
@@ -1053,7 +821,7 @@ git commit -m "test(nyaa): measure matcher A/B, live results, and tracker reacha
 
 - [ ] **Step 1: Bump the version**
 
-In `nyaa-nuvio/manifest.json`, set the top-level `"version"` to `"1.1.0"`, the `scrapers[0].version` to `"1.1.0"`, and update `description` to `"Anime torrents from Nyaa.si - RSS episode matching, anime tracker swarm, formatted labels"`.
+Set the top-level `"version"` to `"1.1.0"`, the `scrapers[0].version` to `"1.1.0"`, and update `description` to `"Anime torrents from Nyaa.si - hardened episode matching, anime tracker swarm, formatted labels"`.
 
 - [ ] **Step 2: Verify everything still passes**
 
@@ -1061,7 +829,7 @@ Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`.
 
 Run: `node nyaa-nuvio/bench.js --gate`
-Expected: `GATE PASS` (or the recorded FAIL from Task 5, unchanged).
+Expected: `GATE PASS`, exit 0.
 
 Run: `node -e "JSON.parse(require('fs').readFileSync('nyaa-nuvio/manifest.json','utf8')); console.log('manifest ok')"`
 Expected: `manifest ok`.
@@ -1069,13 +837,13 @@ Expected: `manifest ok`.
 - [ ] **Step 3: Confirm no stray artifacts**
 
 Run: `git status --short`
-Expected: only `nyaa-nuvio/manifest.json` modified. `corpus.json`, `bench.js`, and `tracker-health.js` are already committed and must be tracked, not ignored.
+Expected: only `nyaa-nuvio/manifest.json` modified. `corpus.json`, `bench.js`, and `tracker-health.js` must be tracked, not ignored. `.playwright-mcp/` stays untracked.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add nyaa-nuvio/manifest.json
-git commit -m "chore(nyaa): bump to 1.1.0 for tracker and label improvements"
+git commit -m "chore(nyaa): bump to 1.1.0 for matcher, tracker and label improvements"
 ```
 
 Do not push. Leave the branch for review.
@@ -1084,6 +852,8 @@ Do not push. Leave the branch for review.
 
 ## Self-review notes
 
-- **Spec coverage:** Part A1 → Task 2, Part A2 → Task 3, Part B → Task 4, Part C → Task 5, Stages 1-2 → Task 1, Stage 3-4 → Task 6, file list → Tasks 1-7. Every spec section maps to a task.
-- **Correction applied during planning:** spec 3.2 originally ordered live-best-trackers before the anime set, which at a 25 cap can evict all four anime trackers. Spec updated to anime-first; Task 2 Step 3 implements anime-first and tests for it explicitly.
-- **Type consistency:** `mergeTrackers(best)`, `getBestTrackers()`, `initBestTrackers()`, `detectAudioTags(title)`, `formatStreamName(item, quality, tags)`, `matchEpisodePTT(title, season, episode, absolute)`, `USE_PTT` are each defined once and used with the same signature everywhere.
+- **Spec coverage:** Part C → Task 2, Part A1 → Task 3, Part A2 → Task 4, Part B → Task 5, Stages 1-2 → Task 1, Stage 3-4 → Task 6, file list → Tasks 1-7. Every spec section maps to a task.
+- **Corrections applied during execution, both recorded in the spec:**
+  - Spec 3.2 ordered live-best-trackers before the anime set, which at a 25 cap can evict all four anime trackers. Now anime-first, tested explicitly in Task 3.
+  - Spec 3.4 specified a vendored `parse-torrent-title` matcher. Measured to resolve 0 of 8 real gaps, so it was replaced with four targeted `matchEpisode` fixes. The old gate `hybrid F1 > current F1` was also unsatisfiable at F1 1.000; the gate is now precision 1.000 / recall 1.000 on a corpus that the pre-change matcher provably fails.
+- **Type consistency:** `mergeTrackers(best)`, `getBestTrackers()`, `initBestTrackers()`, `detectAudioTags(title)`, `formatStreamName(item, quality, tags)` are each defined once and used with the same signature everywhere. `matchEpisode(title, season, episode, absolute)` keeps its existing signature — Part C changes its internals, not its contract.
