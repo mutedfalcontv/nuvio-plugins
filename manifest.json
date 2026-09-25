@@ -18,7 +18,7 @@
       "id": "nyaa",
       "name": "Nyaa",
       "description": "Anime torrents from Nyaa.si",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "filename": "nyaa-nuvio/nyaa.js",
       "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],

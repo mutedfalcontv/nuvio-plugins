@@ -97,15 +97,24 @@ async function getTmdbTitles(tmdbId, mediaType) {
 
     var origName = data.original_name || data.original_title;
     if (origName && titles.indexOf(origName) === -1) {
+      titles.push(origName);
+    }
+
+    if (origName) {
       var isAscii = true;
       for (var ci = 0; ci < origName.length; ci++) {
         if (origName.charCodeAt(ci) > 127) { isAscii = false; break; }
       }
-      if (isAscii) {
-        titles.push(origName);
-      } else {
+      if (!isAscii) {
         var romaji = await getRomajiTitle(tmdbId, mediaType);
-        if (romaji && titles.indexOf(romaji) === -1) titles.push(romaji);
+        if (romaji && titles.indexOf(romaji) === -1) {
+          titles.push(romaji);
+        } else {
+          var aniRomaji = await searchAniListTitle(data.name || data.title);
+          if (aniRomaji && titles.indexOf(aniRomaji) === -1) {
+            titles.push(aniRomaji);
+          }
+        }
       }
     }
   } catch (e) {
@@ -158,6 +167,41 @@ async function getKitsuTitles(tmdbId) {
     console.error("Kitsu fetch failed:", e.message);
   }
   return titles;
+}
+
+async function searchAniListTitle(englishTitle) {
+  if (!englishTitle) return null;
+  try {
+    var query = `
+      query ($search: String) {
+        Media(search: $search, type: ANIME) {
+          title { romaji english }
+        }
+      }`;
+    var variables = { search: englishTitle };
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: variables })
+    });
+    if (resp.status === 429) {
+      console.error("AniList rate limited, skipping romaji search");
+      return null;
+    }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media || !data.data.Media.title) return null;
+    var title = data.data.Media.title;
+    if (title.romaji && title.romaji !== englishTitle) return title.romaji;
+    if (title.english && title.english !== englishTitle) return title.english;
+    return null;
+  } catch (e) {
+    console.error("AniList title search failed:", e.message);
+    return null;
+  }
 }
 
 async function getKitsuAbsoluteEp(kitsuId, season, episode) {
