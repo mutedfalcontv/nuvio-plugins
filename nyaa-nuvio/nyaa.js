@@ -30,6 +30,7 @@ var EPISODE_PATTERNS = [
   { re: /S(\d+)\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /S(\d+)\s*\.\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /S(\d+)\s*[-–]\s*(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 },
+  { re: /\bS(\d{1,2})\s*[-–]\s*E(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 },
   { re: /Season\s+(\d+)\s+Episode\s+(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /(\d+)x(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /\[(\d+)\]$/i, seasonGroup: null, epGroup: 1 },
@@ -39,7 +40,13 @@ var EPISODE_PATTERNS = [
   { re: /\[(\d+)v\d\]/i, seasonGroup: null, epGroup: 1 }
 ];
 
-var DASH_EP_PATTERN = /-\s*(\d{1,2})\b(?!\s*[pP])/i;
+// Group dash form: "- 08", "- 09v2", "- 1122". 1-4 digits covers long-running
+// series (One Piece E1122). Group 2 captures an optional "v2"/"v3" revision
+// suffix so a re-encode of the same episode still matches. The trailing
+// (?![0-9a-z]) boundary replaces the old (?!\s*[pP]) guard and subsumes it: it
+// stops the match from landing mid-digit-run ("1122" must not be read as "11")
+// and from eating the stem of a "1080p"-style tag.
+var DASH_EP_PATTERN = /-\s*(\d{1,4})(\s*v\d+)?(?![0-9a-z])/i;
 var BATCH_PATTERN = /\b(batch|complete|season\s+\d+\s+pack)\b/i;
 var RANGE_PATTERN = /S(\d+)\s*E(\d+)\s*[-–]\s*E?(\d+)/i;
 var RES_PATTERN = /\b(4K|2160p|1080p|720p|480p|360p)\b/i;
@@ -50,6 +57,31 @@ var TRUSTED_PATTERN = /\b(trusted|v2|remaster)\b/i;
 // token, a bare trailing number (e.g. H.264's "264") must never be treated as a
 // season-1 absolute episode.
 var SEASON_TOKEN_PATTERN = /\bS\s*(\d+)|Season\s+(\d+)/i;
+
+// Season marker read off the RAW title. cleanTorrentTitle strips "(...)" before
+// any season pattern runs, so "Show (Season 2) - 13" looks season-less by the
+// time SEASON_TOKEN_PATTERN sees it and its dash number reads as a season-1
+// absolute. Release groups routinely parenthesise the season, so the raw title
+// has to be consulted. Stricter than SEASON_TOKEN_PATTERN on the "S<n>" arm (it
+// requires a real word boundary, so "S03E09" falls through to the cleaned-title
+// fallback) and looser on the spelled-out arm ("Season.2", "Season2", "Saison").
+var RAW_SEASON_PATTERN = /(?:^|[^A-Za-z0-9])(?:S(\d{1,2})\b|(?:Season|Saison)[.\s_-]?(\d{1,2})\b)/i;
+
+function rawTitleSeason(title) {
+  var m = String(title || "").match(RAW_SEASON_PATTERN);
+  if (!m) return null;
+  return parseInt(m[1] || m[2], 10);
+}
+
+// Numbers that are never episode numbers, in either of the two digit-tolerant
+// branches. A 4-digit group in the 19xx/20xx range is a year; 480/720/1080/
+// 1440/2160 are resolutions. cleanTorrentTitle only strips the "p" forms
+// ("1080p"), never a bare "1080" or a "[2024]" year, so all of these survive
+// cleaning and land in the dash and trailing-number branches.
+function looksLikeMetadata(n) {
+  return (n >= 1900 && n <= 2099) ||
+    n === 480 || n === 720 || n === 1080 || n === 1440 || n === 2160;
+}
 
 // ---- Network helpers (ported from nuvio-torlink-addon, Hermes-safe) ----
 
@@ -503,13 +535,28 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
   // "Code Geass: Dakkan no Roze - 01 ~ 12 [BATCH]") matches a S1E1 request.
   if (BATCH_PATTERN.test(cleaned)) return false;
 
+  // Does this title declare a season, and which one? Computed once, from the
+  // raw title first and the cleaned title as a fallback, and used by every
+  // branch below. Two competing definitions of "does this title have a season"
+  // is exactly what allowed "Show (Season 2) - 13" to satisfy an S1 request: the
+  // dash branch asked the cleaned title, the season-less guards asked only the
+  // request.
+  var rawSeason = rawTitleSeason(title);
+  var seasonInTitle = cleaned.match(SEASON_TOKEN_PATTERN);
+  var titleSeason = rawSeason !== null
+    ? rawSeason
+    : (seasonInTitle ? parseInt(seasonInTitle[1] || seasonInTitle[2], 10) : null);
+  var titleDeclaresSeason = titleSeason !== null;
+
   // Mid-chain bracket episode number on the RAW title: "[08][WebRip][HEVC_AAC]"
   // has its brackets stripped by cleanTorrentTitle, so the episode is lost. Only
   // 1-2 digit numeric brackets are treated as episodes today (resolutions like
   // "[1080p]" and years like "[2024]" are 3-4 digits or contain non-digits).
-  // No season info is present, so only match S1 requests to avoid false positives.
+  // The bracket carries no season, so this only satisfies a request whose own
+  // title declares no season either - "Show S2 [08][WebRip]" must not answer an
+  // S1E8 request just because the season lives outside the brackets.
   var rawChain = title.match(/\[(\d{1,2})\](?=\[)/i);
-  if (rawChain && reqSeason === 1 && reqEp === parseInt(rawChain[1], 10)) {
+  if (rawChain && reqSeason === 1 && !titleDeclaresSeason && reqEp === parseInt(rawChain[1], 10)) {
     return true;
   }
 
@@ -530,10 +577,12 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
     if (pat.seasonGroup !== null) {
       var foundSeason = parseInt(m[pat.seasonGroup], 10);
       if (foundSeason !== reqSeason) continue;
-    } else if (reqSeason !== 1) {
+    } else if (reqSeason !== 1 || titleDeclaresSeason) {
       // Season-less episode marker ("E09", "EP239", "[8]") carries no season, so
-      // it only satisfies a S1 request. Without this, "EP239" would match S1..S5
-      // all at ep 239 (multi-season false positives). Absolute cross-season
+      // it only satisfies a S1 request — and only when the title itself declares
+      // no season either. Without the second half, "EP239" matches S1..S5 all at
+      // ep 239, and "EngSub Show S2 - E08" has its own S2 ignored while the bare
+      // E(\d+) handler reports E08 as a season-1 episode. Absolute cross-season
       // matching is handled separately via the dash/trailing abs logic.
       continue;
     }
@@ -544,38 +593,45 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
   var dashMatch = cleaned.match(DASH_EP_PATTERN);
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
-    // Detect ANY season marker ("S2", "Season 2", "S02"). When present, the
-    // dash number is SEASON-RELATIVE — e.g. "Solo Leveling Season 2 - 08" is
-    // S2E8, so it must NOT match a S1E8 request.
-    var seasonInTitle = cleaned.match(SEASON_TOKEN_PATTERN);
-    var titleSeason = seasonInTitle
-      ? parseInt(seasonInTitle[1] || seasonInTitle[2], 10)
-      : null;
-    if (titleSeason !== null) {
-      if (titleSeason === reqSeason && dashEp === reqEp) return true;
-    } else if (reqSeason === 1 && dashEp === reqEp) {
-      // Absolute "- 08" with no season token (SubsPlease S1).
-      return true;
-    } else if (!isNaN(abs) && dashEp === abs) {
-      // Absolute "- 15" (Bookworm S2 absolute numbering).
-      return true;
+    // A revision suffix is a fansub re-encode marker and only ever rides on a
+    // low episode number ("09v2", "12v3"). On a 3-4 digit number the same
+    // "- 265v2" shape is a codec or resolution tag that lost its leading "x", so
+    // reject it as a revision rather than blanket-refusing 265 outright - "One
+    // Piece - 265" is a real episode.
+    var dashIsRevision = !!dashMatch[2] && dashEp >= 100;
+    // Rejecting the candidate (rather than returning false) lets the batch
+    // handler below still see a year-shaped title such as
+    // "Show - 2024 [1080p] [BATCH]".
+    if (!dashIsRevision && !looksLikeMetadata(dashEp)) {
+      // Any season marker ("S2", "Season 2", "(Season 2)", "S02") makes the dash
+      // number SEASON-RELATIVE - e.g. "Solo Leveling Season 2 - 08" is S2E8, so it
+      // must NOT match a S1E8 request.
+      if (titleSeason !== null) {
+        if (titleSeason === reqSeason && dashEp === reqEp) return true;
+      } else if (reqSeason === 1 && dashEp === reqEp) {
+        // Absolute "- 08" with no season token (SubsPlease S1).
+        return true;
+      } else if (!isNaN(abs) && dashEp === abs) {
+        // Absolute "- 15" (Bookworm S2 absolute numbering).
+        return true;
+      }
     }
   }
 
   // Rakun post-processor: trailing number as episode (when no season in title)
-  if (!SEASON_TOKEN_PATTERN.test(cleaned)) {
-    if (reqSeason === 1) {
-      var trailingEp = cleaned.match(/\b(\d{2,4})\s*$/);
-      if (trailingEp) {
-        var num = parseInt(trailingEp[1], 10);
-        if (num === reqEp) return true;
-      }
-    } else if (!isNaN(abs)) {
-      // Absolute numbering with no season token (season > 1).
-      var trailingAbs = cleaned.match(/\b(\d{2,4})\s*$/);
-      if (trailingAbs) {
-        var anum = parseInt(trailingAbs[1], 10);
-        if (anum === abs) return true;
+  if (!titleDeclaresSeason) {
+    var trailing = cleaned.match(/\b(\d{2,4})\s*$/);
+    if (trailing) {
+      var num = parseInt(trailing[1], 10);
+      // Years and bare resolutions reach this branch: cleanTorrentTitle strips
+      // "1080p" but not "1080" or "[2024]".
+      if (!looksLikeMetadata(num)) {
+        if (reqSeason === 1 && num === reqEp) {
+          return true;
+        } else if (reqSeason !== 1 && !isNaN(abs) && num === abs) {
+          // Absolute numbering with no season token (season > 1).
+          return true;
+        }
       }
     }
   }

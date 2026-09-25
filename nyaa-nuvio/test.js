@@ -110,6 +110,41 @@ function runOffline() {
   assert("size parsed to bytes", items[0].size === Math.round(1.2 * 1024 * 1024 * 1024) || items[0].size === Math.round(900 * 1024 * 1024));
   assert("padZero", ctx.padZero(8, 2) === "08" && ctx.padZero(1, 2) === "01");
 
+  // ---- Part C: hardened matcher branches ----
+  assert("4-digit absolute dash form",
+    ctx.matchEpisode("[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv", 1, 1122, null) === true);
+  assert("4-digit dash form, no parens",
+    ctx.matchEpisode("[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]", 1, 1123, null) === true);
+  assert("v2 revision suffix",
+    ctx.matchEpisode("[SubsPlease] Show - 09v2 (1080p)", 1, 9, null) === true);
+  assert("v3 revision suffix",
+    ctx.matchEpisode("[Anime Time] Show - 12v3 (1080p)", 1, 12, null) === true);
+  assert("parenthesised Season N",
+    ctx.matchEpisode("[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]", 2, 13, null) === true);
+  assert("spaced S2 - E08 form",
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 2, 8, null) === true);
+
+  // Guards. Each of these is a way the widened branches could go wrong.
+  assert("guard: resolution is not an episode",
+    ctx.matchEpisode("[Group] Show S01E08 1080p 2160p HEVC x265", 1, 2160, null) === false);
+  assert("guard: codec number is not an episode",
+    ctx.matchEpisode("[Group] Show S01E08 1080p x265 10bit", 1, 265, null) === false);
+  assert("guard: year is not an episode",
+    ctx.matchEpisode("[Group] Movie (2024) [1080p] [x264]", 1, 2024, null) === false);
+  assert("guard: v2 suffix does not shift the episode",
+    ctx.matchEpisode("[SubsPlease] Show - 09v2 (1080p)", 1, 8, null) === false);
+  assert("guard: v2 suffix does not concatenate to 80",
+    ctx.matchEpisode("[Doki] Show - 08v2 (1080p) [HEVC-10bit]", 1, 80, null) === false);
+  assert("guard: parenthesised season still blocks S1",
+    ctx.matchEpisode("[Judas] Show (Season 2) - 13 [1080p]", 1, 13, null) === false);
+  assert("guard: spaced S2 - E08 does not match S1 or S3",
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 1, 8, null) === false &&
+    ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 3, 8, null) === false);
+  assert("guard: batch still rejected after widening",
+    ctx.matchEpisode("[Erai-raws] Show - 01 ~ 12 [1080p][BATCH][Multi-Subs]", 2, 5, null) === false);
+  assert("guard: raw bracket chain honours the title's season",
+    ctx.matchEpisode("[Group] Show S2 [08][WebRip][HEVC_AAC]", 1, 8, null) === false);
+
   // ---- integration (mocked fetch): SubsPlease + English both returned ----
   return ctx.getStreams("122991", "tv", 1, 8).then(function (res) {
     console.log("  integration results:", res.length);
