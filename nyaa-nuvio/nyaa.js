@@ -35,13 +35,21 @@ var MAX_TRACKERS = 25;
 // take entries from the end.
 function mergeTrackers(best) {
   var out = [];
-  var seen = {};
+  // Null-prototype so a live entry literally named "constructor" or "toString"
+  // is tracked as itself rather than being mistaken for an inherited member and
+  // silently dropped.
+  var seen = Object.create(null);
   function push(t) {
     if (t && !seen[t]) { seen[t] = true; out.push(t); }
   }
 
   for (var a = 0; a < TRACKERS_ANIME.length; a++) push(TRACKERS_ANIME[a]);
 
+  // Room is computed once, so the live list cannot crowd the generic set out
+  // gradually - it either fits or takes every remaining slot. With the real
+  // trackers_best.txt that is the common case, not the exception: the generic
+  // set is a fallback for a short or failed live list, and in practice receives
+  // zero slots. See spec 3.2.
   var bestList = best || [];
   var room = MAX_TRACKERS - out.length;
   for (var b = 0; b < bestList.length && b < room; b++) push(bestList[b]);

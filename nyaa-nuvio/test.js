@@ -194,9 +194,15 @@ function runOffline() {
   const magnet = ctx.buildMagnet("AAA11111111111111111111111111111111111111", "Some Title");
   assert("buildMagnet keeps the announce prefix and hash verbatim",
     magnet.indexOf("magnet:?xt=urn:btih:AAA11111111111111111111111111111111111111&dn=") === 0);
+  // Pins the dn encoding itself, not just the prefix up to "&dn=". Dropping
+  // encodeURIComponent here leaves every other assertion green.
+  assert("buildMagnet percent-encodes the display name",
+    magnet.indexOf("&dn=Some%20Title&tr=") !== -1);
   assert("buildMagnet embeds anime tracker", magnet.indexOf(encodeURIComponent("http://nyaa.tracker.wf:7777/announce")) !== -1);
   const trCount = magnet.split("&tr=").length - 1;
-  assert("buildMagnet tracker count within cap", trCount <= 25 && trCount >= 14);
+  // Static-only build: 4 anime + 10 generic, exactly. Not a range - a loose
+  // bound would survive losing a generic tracker.
+  assert("buildMagnet emits all 14 static trackers, uncapped", trCount === 14);
   assert("buildMagnet has no duplicate tracker params", (function () {
     const trs = magnet.split("&tr=").slice(1);
     for (let t = 0; t < trs.length; t++) if (trs.indexOf(trs[t]) !== t) return false;

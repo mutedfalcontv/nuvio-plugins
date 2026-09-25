@@ -94,7 +94,7 @@ Total tracker count is capped (see 3.2) so magnet URIs stay within what Stremio-
 Multi Subs
 ```
 
-- resolution: existing `parseQuality()` (`nyaa.js:598`)
+- resolution: existing `parseQuality()` (`nyaa.js:762`)
 - audio/subtitle tags: new `detectAudioTags()` driven by a language-word mapping ported from Torrentio `addon/lib/languages.js` (`dubbed`, `multi audio`, `multi subs`, `dual audio`) and the title-scanning approach of `addon/lib/subtitles.js:60`
 - untagged titles get a single space instead of an empty line
 
@@ -102,7 +102,7 @@ Multi Subs
 
 ### 3.2 Magnet length cap
 
-`buildMagnet()` (`nyaa.js:608`) currently appends 10 trackers. With the anime set and Part B it could exceed 25. Rule: build the ordered list as
+`buildMagnet()` (`nyaa.js:715` before this part, `:764` after) appends 10 trackers. With the anime set and Part B it could exceed 25. Rule: build the ordered list as
 
 ```
 [anime set]                                  -> always all 4, never evicted
@@ -113,6 +113,16 @@ Multi Subs
 The anime set goes first on purpose. If the live best list were first it could consume all 25 slots on its own and silently drop the anime trackers, which are the entire point of Part A for this plugin. Eviction happens from the tail, never from the anime set.
 
 Order matters for the rest: live best trackers are the healthiest of the remainder, generic trackers fill whatever is left. The result is deterministic for identical inputs, which keeps Stage 4 measurements comparable.
+
+**The generic 10 are a fallback, not a floor — and this is the consequence to be aware of.** `room` is computed once, after the anime block, so the live list takes every remaining slot or none of them. Measured generic-survival against live-list length:
+
+| distinct live entries | generic slots kept |
+|---|---|
+| 0-15 | 10 (all) |
+| 16 / 17 / 19 / 20 | 5 / 4 / 2 / 1 |
+| **21 or more** | **0** |
+
+The threshold counts only entries *not already in the anime set* — a 21-entry live list that repeats the four anime URLs still leaves 4 generic slots, because dedup returns the freed room. The real `trackers_best.txt` carries far more than 21 unique announce URLs, so in production the generic set receives **zero slots** and every magnet is anime + live. That is the intended trade, not an oversight: the generic trackers carry almost no anime peers, so starving them costs this plugin very little, whereas evicting the anime set would defeat Part A entirely. What it does mean is that `TRACKERS` is effectively dead in production, and Task 5 should record the actual fetched list length so the behaviour is measured rather than assumed.
 
 ### 3.3 Part B — live best trackers
 
@@ -141,7 +151,7 @@ All four fixes are additions to the existing rule chain in `matchEpisode()` (`ny
 
 | Gap | Root cause | Fix shape |
 |---|---|---|
-| 4-digit absolute (`One Piece - 1122`) | The Rakun trailing-number rule (`nyaa.js:568`) requires end-of-string, so a trailing `.mkv` defeats it | Extend the dash-episode pattern to 1-4 digits, anchored on the release group's dash form, still requiring the absence of a season token unless the season matches |
+| 4-digit absolute (`One Piece - 1122`) | The Rakun trailing-number rule  requires end-of-string, so a trailing `.mkv` defeats it | Extend the dash-episode pattern to 1-4 digits, anchored on the release group's dash form, still requiring the absence of a season token unless the season matches |
 | `v2`/`v3` suffix (`- 09v2`) | The dash-episode pattern requires a non-alphanumeric boundary after the number | Allow an optional `v\d+` revision suffix and ignore it |
 | Spelled `Season N` (`Show (Season 2) - 13`) | `cleanTorrentTitle` deletes the parentheses *and* the season token before `SEASON_TOKEN_PATTERN` ever runs — `[Judas] Show (Season 2) - 13 [1080p][HEVC x265 10bit][Multi-Subs]` cleans to `Judas Show - 13 10bit Multi-Subs` | Read the season off the **raw** title, before cleaning, and feed that single value to every branch that asks "does this title declare a season?" |
 | `S2 - E08` | No episode pattern covers the spaced `S2 - E08` form | Add a dedicated pattern with the season group bound to the request, so it cannot match across seasons |

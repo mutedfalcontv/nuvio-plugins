@@ -75,7 +75,7 @@ There is no second matcher any more, so the two-context harness and the three-ro
 
 ```javascript
 // Corpus scorer for the nyaa matcher. Run:  node nyaa-nuvio/bench.js
-// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 if precision or recall < 1.0)
+// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 on any FN, FP, or throw)
 //
 // Scores the single in-file matchEpisode(). The before/after comparison is taken
 // across commits, not across matchers: record this output, make the change, run
@@ -149,7 +149,7 @@ if (process.argv.indexOf("--gate") !== -1) process.exit(ok ? 0 : 1);
 
 - [ ] **Step 4: Record the BEFORE score**
 
-Run: `node nyaa-nuvio/bench.js`
+Run: `node nyaa-nuvio/bench.js --gate`
 Expected: **exactly 10 false negatives** (ids `21` through `29`, plus `48-abs-4digit-bracketed`) and **7 false positives** (`38`, `40`, and `43` through `47`). Precision 0.588, recall 0.500, F1 0.541. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 6.
 
 If the counts differ, do **not** adjust the corpus to match the expectation. A surprise here is information: it means either a case is unreachable in the way you think, or `matchEpisode` is worse than believed. Report the delta before continuing.
@@ -259,7 +259,7 @@ function looksLikeMetadata(n) {
 
 Then call it from **both** places that can now accept a 4-digit episode: the dash branch and the Rakun trailing-number branch. Reject the candidate and fall through to the next pattern rather than returning `false` outright, so a title the dash pattern cannot speak for still reaches the branches below.
 
-One correction to an earlier draft of this step: it claimed the fall-through exists so a `[BATCH]` title can still be seen by the batch handler. It cannot — `nyaa.js:536` already returns `false` for anything `BATCH_PATTERN` matches, so `[Group] Show - 2024 [1080p][BATCH]` is rejected long before the dash branch. The fall-through is about the episode branches, not about rescuing batches.
+One correction to an earlier draft of this step: it claimed the fall-through exists so a `[BATCH]` title can still be seen by the batch handler. It cannot — `nyaa.js:638` already returns `false` for anything `BATCH_PATTERN` matches, so `[Group] Show - 2024 [1080p][BATCH]` is rejected long before the dash branch. The fall-through is about the episode branches, not about rescuing batches.
 
 Read the branch structure before editing. If a branch `return`s on a digit match, the guard has to sit *before* the match commits, not after. Case 21 (`One Piece - 1122`) must still match at S1E1122, so the predicate is on the candidate's value, never on its digit count alone — `1122` is inside neither range.
 
@@ -267,7 +267,7 @@ Cases 49 and 50 (`Show - 1080v2`, `Show - 265v2`) guard the `v\d` suffix. `265` 
 
 - [ ] **Step 4: Read the season off the RAW title, not the cleaned one**
 
-`cleanTorrentTitle` strips `(...)` at `nyaa.js:483`, so by the time `SEASON_TOKEN_PATTERN` runs, `(Season 2)` is already gone and its absence is indistinguishable from "this title declares no season" — which is precisely why a Season 2 release satisfies an S1 request today. **Widening the season pattern alone cannot fix this.** The season has to be read before cleaning.
+`cleanTorrentTitle` strips `(...)` at `nyaa.js:617`, so by the time `SEASON_TOKEN_PATTERN` runs, `(Season 2)` is already gone and its absence is indistinguishable from "this title declares no season" — which is precisely why a Season 2 release satisfies an S1 request today. **Widening the season pattern alone cannot fix this.** The season has to be read before cleaning.
 
 Add a raw-title probe:
 
@@ -330,7 +330,7 @@ Expected: `ALL TESTS PASSED`, exit 0.
 
 - [ ] **Step 7: Run the corpus gate**
 
-Run: `node nyaa-nuvio/bench.js`
+Run: `node nyaa-nuvio/bench.js --gate`
 Expected: `GATE PASS`, 0 false negatives, 0 false positives, precision 1.000, recall 1.000.
 
 **This is the decision point.** If the gate does not pass, do not proceed. Read the printed false-positive list, find which widened branch is over-matching, and tighten that branch. If you cannot make it pass without weakening a guard assertion, report BLOCKED with the specific case and the two conflicting requirements.
@@ -348,7 +348,7 @@ git commit -m "fix(nyaa): match 4-digit absolute, v2 revisions, (Season N) and S
 
 **Files:**
 - Modify: `nyaa-nuvio/nyaa.js:1-12` (add `TRACKERS_ANIME`, `MAX_TRACKERS`, `mergeTrackers`)
-- Modify: `nyaa-nuvio/nyaa.js:608-615` (`buildMagnet` uses `mergeTrackers`)
+- Modify: `nyaa-nuvio/nyaa.js:772-780` (`buildMagnet` uses `mergeTrackers`)
 - Modify: `nyaa-nuvio/test.js` (new assertions)
 
 - [ ] **Step 1: Write the failing test**
@@ -428,7 +428,7 @@ function mergeTrackers(best) {
 
 - [ ] **Step 4: Rewire `buildMagnet`**
 
-Replace the tracker loop in `buildMagnet()` (`nyaa-nuvio/nyaa.js:608-615`) with:
+Replace the tracker loop in `buildMagnet()` (`nyaa-nuvio/nyaa.js:772-780`) with:
 
 ```javascript
 function buildMagnet(infoHash, title) {
@@ -460,7 +460,7 @@ function getBestTrackers() {
 Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`, exit 0.
 
-Run: `node nyaa-nuvio/bench.js`
+Run: `node nyaa-nuvio/bench.js --gate`
 Expected: `GATE PASS` still. Trackers must not touch matching.
 
 - [ ] **Step 6: Commit**
@@ -584,7 +584,7 @@ In `getStreams`, the pushed result should read:
 Run: `node nyaa-nuvio/test.js`
 Expected: `ALL TESTS PASSED`, exit 0.
 
-Run: `node nyaa-nuvio/bench.js`
+Run: `node nyaa-nuvio/bench.js --gate`
 Expected: `GATE PASS` still.
 
 - [ ] **Step 6: Commit**
@@ -701,6 +701,8 @@ function initBestTrackers() {
 }
 ```
 
+**Filter non-string entries at this boundary, not downstream.** `mergeTrackers` is duck-typed and will happily forward whatever it is handed: a numeric entry becomes a literal `&tr=1` in the magnet, and a nested array is flattened into its elements. Neither is reachable from a well-formed `trackers_best.txt`, but the response body is untrusted input and the dedup set in `mergeTrackers` is keyed on the raw value. Accept a line only if it is a non-empty string that looks like an announce URL (`/^https?:\/\/|udp:\/\//` and containing `/announce`), and drop the rest. Add a test for a body containing a blank line, a bare number, a nested array, and a non-announce URL.
+
 - [ ] **Step 4: Fire it without blocking `getStreams`**
 
 As the first statement inside `getStreams` (`nyaa-nuvio/nyaa.js:152`):
@@ -720,7 +722,7 @@ Expected: `ALL TESTS PASSED`, exit 0.
 
 Temporarily point `BEST_TRACKERS_URL` at an unreachable host, run `node nyaa-nuvio/test.js`, confirm `best trackers fetch failed:` is logged and the suite still passes, then restore the URL.
 
-Run: `node nyaa-nuvio/bench.js`
+Run: `node nyaa-nuvio/bench.js --gate`
 Expected: `GATE PASS` still.
 
 - [ ] **Step 7: Commit**
