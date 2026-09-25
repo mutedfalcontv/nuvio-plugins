@@ -39,7 +39,7 @@ The matcher has been maintained by patch-accumulation: each bug report adds a br
 
 - Debrid resolution. NuvioWeb already resolves magnets (`NuvioWeb/js/core/debrid/directDebridResolver.js:37`, 15-minute resolve cache, `debridFileSelection.js`). Porting Torrentio's `moch/` layer into the plugin would duplicate app behaviour.
 - Adding or changing sources/queries.
-- Changing the set of titles queried, or the request budget (`MAX_NYAA_REQUESTS = 20`, `nyaa.js:196`).
+- Changing the set of titles queried, or the request budget (`MAX_NYAA_REQUESTS = 20`, `nyaa.js:430`).
 - Depending on Torrentio's scraper. That code is not in the public repo: the addon only reads a pre-scraped database (`addon.js:87` -> `addon/lib/repository.js:20`), so nothing about nyaa.si parsing is available to copy.
 
 ## 2. Constraints
@@ -94,7 +94,7 @@ Total tracker count is capped (see 3.2) so magnet URIs stay within what Stremio-
 Multi Subs
 ```
 
-- resolution: existing `parseQuality()` (`nyaa.js:762`)
+- resolution: existing `parseQuality()` (`nyaa.js:863`)
 - audio/subtitle tags: new `detectAudioTags()` driven by a language-word mapping ported from Torrentio `addon/lib/languages.js` (`dubbed`, `multi audio`, `multi subs`, `dual audio`) and the title-scanning approach of `addon/lib/subtitles.js:60`
 - untagged titles get a single space instead of an empty line
 
@@ -122,17 +122,44 @@ Order matters for the rest: live best trackers are the healthiest of the remaind
 | 16 / 17 / 19 / 20 | 5 / 4 / 2 / 1 |
 | **21 or more** | **0** |
 
-The threshold counts only entries *not already in the anime set* — a 21-entry live list that repeats the four anime URLs still leaves 4 generic slots, because dedup returns the freed room. The real `trackers_best.txt` carries far more than 21 unique announce URLs, so in production the generic set receives **zero slots** and every magnet is anime + live. That is the intended trade, not an oversight: the generic trackers carry almost no anime peers, so starving them costs this plugin very little, whereas evicting the anime set would defeat Part A entirely. What it does mean is that `TRACKERS` is effectively dead in production, and Task 5 should record the actual fetched list length so the behaviour is measured rather than assumed.
+The threshold counts only entries *not already in the anime set* — a 21-entry live list that repeats the four anime URLs still leaves 4 generic slots, because dedup returns the freed room. This paragraph originally asserted that the live file "carries far more than 21 unique announce URLs" and that the generic set would therefore get **zero slots in production**. That was an assumption, and Task 5 measured it against the real file.
+
+**Measured 2026-09-26** (live fetch, `best trackers loaded: 20`): 20 announce URLs parse out of `trackers_best.txt`, all 20 are distinct, and none duplicate the anime set. Merged output is 25 entries — the 4 anime head, all 20 live entries, and 4 of the 10 generic. So the generic set is *not* dead in production today; it is one entry away from being, since a single additional live tracker would consume the last slot. The list is community-maintained and can grow at any time, so the starvation path stays documented as the expected outcome rather than the current one.
+
+Either way the trade is the same and is intentional, not an oversight: the generic trackers carry almost no anime peers, so starving them costs this plugin very little, whereas evicting the anime set would defeat Part A entirely. The fetched length is logged on every successful load precisely so this paragraph can be re-measured instead of re-argued.
 
 ### 3.3 Part B — live best trackers
 
 Port of Torrentio `initBestTrackers()` (`addon/lib/magnetHelper.js:8`):
 
 - Source: `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt`
-- Fetched at most once per process, triggered lazily on the first `buildMagnet()` call
+- Fetched at most once per process, triggered lazily on the first `getStreams()` call. The trigger cannot be `buildMagnet()` as first written: `buildMagnet()` is synchronous and cannot await, so a first call would always build a magnet with no live trackers. Warming at the top of `getStreams()` means the first request uses the static set and later ones use the live list, which is the same "first call may be static" outcome stated in 4.2 without the impossible synchronous wait.
 - In-flight promise reused so concurrent `getStreams()` calls do not stack fetches
 - 5-second timeout; any failure, non-200, or empty body is logged once and the static set is used unchanged
 - Never throws into `getStreams()`
+- On success the fetched list length is logged (`best trackers loaded: N`) so 3.2's starvation claim is measured, not assumed
+
+#### Where things live (as of Task 5)
+
+Line numbers in this document drift as code is added, and many citations above are deliberately frozen at their *pre-change* values because they describe the problem being fixed. For current positions, resolve by symbol:
+
+| Symbol | `nyaa.js` line |
+|---|---|
+| `TRACKERS_GENERIC` | 4 |
+| `TRACKERS_ANIME` | 20 |
+| `MAX_TRACKERS` | 29 |
+| `mergeTrackers()` | 35 |
+| `parseBestTrackers()` | 98 |
+| `initBestTrackers()` | 110 |
+| `MAX_STREAMS` | 170 |
+| `getStreams()` | 380 |
+| `MAX_NYAA_REQUESTS` | 430 |
+| `matchEpisode()` | 727 |
+| `parseQuality()` | 863 |
+| `LANGUAGE_TAGS` | 879 |
+| `detectAudioTags()` | 899 |
+| `formatStreamName()` | 931 |
+| `buildMagnet()` | 940 |
 
 ### 3.4 Part C — matcher hardening (replaces the vendored PTT matcher)
 

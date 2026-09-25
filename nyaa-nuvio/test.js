@@ -7,9 +7,9 @@ const path = require("path");
 
 const SRC = fs.readFileSync(path.join(__dirname, "nyaa.js"), "utf8");
 
-function loadSrc(fetchImpl) {
+function loadSrc(fetchImpl, consoleImpl) {
   const ctx = {
-    console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent,
+    console: consoleImpl || console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent,
     String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON,
     fetch: fetchImpl, module: { exports: {} }, global: {}
   };
@@ -52,6 +52,17 @@ function runOffline() {
 
   function fakeFetch(url) {
     let body;
+    if (url.indexOf("ngosang/trackerslist") !== -1) {
+      // Trackers that slot in after the anime block and before the generic set.
+      // Two entries is deliberately fewer than the 21-slot budget, so the
+      // generic fallback keeps its slots and the ordering stays observable.
+      return Promise.resolve({
+        status: 200,
+        text: () => Promise.resolve(
+          "# comment line\n\nudp://tracker.one.example:6969/announce\nudp://tracker.two.example:451/announce\n\n"
+        )
+      });
+    }
     if (url.indexOf("api.themoviedb.org/3/tv/") !== -1 && url.indexOf("/translations") === -1 && url.indexOf("/alternative_titles") === -1) {
       body = { name: "Smoking Behind the Supermarket with You", original_name: "Super no Ura de Yani Suu Futari" };
     } else if (url.indexOf("/translations") !== -1) {
@@ -335,8 +346,209 @@ function runOffline() {
   assert("detectAudioTags rejects a missing title without scanning it",
     ctx.detectAudioTags(null).length === 0 && ctx.detectAudioTags(undefined).length === 0);
 
-  // ---- integration (mocked fetch): SubsPlease + English both returned ----
-  return ctx.getStreams("122991", "tv", 1, 8).then(function (res) {
+  // ---- Part B: live best trackers ----
+  // A second context so the fetch-failure paths can be exercised without
+  // poisoning the cache of the context the assertions above already used.
+  function loadWithTrackerBody(body, status) {
+    return loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        return Promise.resolve({ status: status, text: () => Promise.resolve(body) });
+      }
+      return fakeFetch(url);
+    });
+  }
+
+  assert("getBestTrackers defaults to empty before fetch", ctx.getBestTrackers().length === 0);
+
+  // Spec 3.2: the actual fetched list length must be recorded, so the real-world
+  // behaviour is measured rather than assumed. The gate on the static budget is
+  // 21 distinct non-anime entries, so the number this prints decides whether
+  // TRACKERS_GENERIC is ever reachable in production.
+  const loadedLogs = [];
+  const recordCtx = loadSrc(function (url) {
+    if (url.indexOf("ngosang/trackerslist") !== -1) {
+      return Promise.resolve({
+        status: 200,
+        text: () => Promise.resolve("udp://tracker.one.example:6969/announce\nudp://tracker.two.example:80/announce")
+      });
+    }
+    return fakeFetch(url);
+  }, {
+    log: function () { loadedLogs.push(Array.prototype.join.call(arguments, " ")); },
+    warn: function () {}, error: function () {}
+  });
+  return recordCtx.initBestTrackers().then(function () {
+    assert("the fetched tracker-list length is recorded",
+      loadedLogs.some(function (l) { return /best trackers loaded: 2\b/.test(l); }));
+  }).then(function () {
+  // Junk the plan requires be dropped at the parse boundary: a blank line, a
+  // comment, a bare number, a non-announce URL, and a leading-whitespace line
+  // that should be trimmed rather than rejected.
+  const junkCtx = loadWithTrackerBody([
+    "# a comment line",
+    // Announce-shaped but commented out. Without the explicit "#" check this
+    // line passes the announce filter, so a comment with a space after the hash
+    // is not a sufficient test case.
+    "#udp://tracker.commented.example:6969/announce",
+    "",
+    "   ",
+    "udp://tracker.one.example:6969/announce",
+    "12345",
+    "https://example.com/scrape",
+    "udp://tracker.two.example:451/announce",
+    "  udp://tracker.three.example:80/announce  "
+  ].join("\n"), 200);
+
+  return junkCtx.initBestTrackers().then(function () {
+    const best = junkCtx.getBestTrackers();
+    assert("initBestTrackers keeps only announce URLs", best.length === 3);
+    assert("initBestTrackers trims whitespace",
+      best[2] === "udp://tracker.three.example:80/announce");
+    assert("initBestTrackers drops comments, blanks, bare numbers and non-announce URLs",
+      best.indexOf("12345") === -1 && best.indexOf("https://example.com/scrape") === -1 &&
+      best.indexOf("# a comment line") === -1 &&
+      best.indexOf("#udp://tracker.commented.example:6969/announce") === -1);
+
+    const withBest = junkCtx.mergeTrackers(best);
+    assert("best trackers slot in after the anime block",
+      withBest[0] === "http://nyaa.tracker.wf:7777/announce" &&
+      withBest[4] === "udp://tracker.one.example:6969/announce");
+    assert("every live entry is a string, so no tracker can be a bare number",
+      withBest.every(function (t) { return typeof t === "string" && t.indexOf("/announce") !== -1; }));
+
+    // ---- once-per-process and in-flight reuse ----
+    let trackerFetches = 0;
+    const countingCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        trackerFetches++;
+        return Promise.resolve({ status: 200, text: () => Promise.resolve("udp://a.example:6969/announce") });
+      }
+      return fakeFetch(url);
+    });
+    // Two calls before the first resolves must share one in-flight promise.
+    const both = Promise.all([countingCtx.initBestTrackers(), countingCtx.initBestTrackers()]);
+    return both.then(function (settled) {
+      assert("concurrent initBestTrackers calls share one in-flight promise",
+        settled[0] === settled[1]);
+      assert("concurrent initBestTrackers calls issue one fetch", trackerFetches === 1);
+      return countingCtx.initBestTrackers().then(function () {
+        assert("initBestTrackers is fetched at most once per process", trackerFetches === 1);
+      });
+    });
+  }).then(function () {
+    // ---- failure paths: log once, fall back to the static set, never throw ----
+    return Promise.all([
+      loadWithTrackerBody("", 200).initBestTrackers(),
+      loadWithTrackerBody("udp://x.example:6969/announce", 404).initBestTrackers(),
+      loadSrc(function (url) {
+        if (url.indexOf("ngosang/trackerslist") !== -1) return Promise.reject(new Error("network down"));
+        return fakeFetch(url);
+      }).initBestTrackers(),
+      loadSrc(function (url) {
+        if (url.indexOf("ngosang/trackerslist") !== -1) return Promise.resolve(null);
+        return fakeFetch(url);
+      }).initBestTrackers()
+    ]).then(function (results) {
+      assert("an empty body falls back to the static set", JSON.stringify(results[0]) === "[]");
+      assert("a non-200 falls back to the static set", JSON.stringify(results[1]) === "[]");
+      assert("a network error falls back to the static set", JSON.stringify(results[2]) === "[]");
+      assert("a null response falls back to the static set", JSON.stringify(results[3]) === "[]");
+      assert("no failure path rejects into the caller", results.length === 4);
+  });
+  }).then(function () {
+    // Spec 3.3: "any failure ... is logged once". A retry after a failure must
+    // not spam the log on every stream request for the life of the process.
+    const logged = [];
+    const quietConsole = {
+      log: function () {}, warn: function () {},
+      // Captures every argument: the cause is logged as a second argument, not
+      // concatenated, so a single-parameter stub would drop it.
+      error: function () { logged.push(Array.prototype.join.call(arguments, " ")); }
+    };
+    let retryFetches = 0;
+    const retryCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        retryFetches++;
+        return Promise.reject(new Error("network down"));
+      }
+      return fakeFetch(url);
+    }, quietConsole);
+    return retryCtx.initBestTrackers()
+      .then(function () { return retryCtx.initBestTrackers(); })
+      .then(function () { return retryCtx.initBestTrackers(); })
+      .then(function () {
+        assert("a repeated failure is logged once, not per attempt", logged.length === 1);
+        assert("the failure message names the cause",
+          logged.length === 1 && /network down/.test(String(logged[0])));
+        // An empty array is truthy, so a bare "if (bestTrackersCache)" guard
+        // treats the failure fallback [] as a populated cache and the process
+        // never retries for its whole lifetime. Each call must re-attempt.
+        assert("a failed fetch is retried on the next call", retryFetches === 3);
+      });
+  }).then(function () {
+    // An empty body must not be cached as a success, or the same truthiness
+    // trap makes the empty result permanent.
+    let emptyFetches = 0;
+    const emptyCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        emptyFetches++;
+        return Promise.resolve({ status: 200, text: () => Promise.resolve("") });
+      }
+      return fakeFetch(url);
+    });
+    return emptyCtx.initBestTrackers().then(function () {
+      assert("an empty body is not cached as a success", emptyCtx.getBestTrackers().length === 0);
+      return emptyCtx.initBestTrackers();
+    }).then(function () {
+      assert("an empty body is retried on the next call", emptyFetches === 2);
+    });
+  }).then(function () {
+    // The 5s budget is a product requirement, so it is a named constant rather
+    // than a magic number. The wall-clock 5s wait itself is not tested - that
+    // would dominate the suite's runtime to prove a timer was set - so the
+    // override is exercised at 60ms instead, which is the same code path.
+    assert("the best-tracker fetch gets its own 5s budget", ctx.BEST_TRACKERS_TIMEOUT_MS === 5000);
+    // Pin that the constant is actually wired to the call, not merely declared.
+    // Top-level vars become context properties, so the budget can be lowered
+    // here and the same code path exercised quickly.
+    const hangTrackerCtx = loadSrc(function (url) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) return new Promise(function () {});
+      return fakeFetch(url);
+    });
+    hangTrackerCtx.BEST_TRACKERS_TIMEOUT_MS = 60;
+    const startedAt = Date.now();
+    return hangTrackerCtx.initBestTrackers().then(function (settled) {
+      // It resolves rather than rejecting - the timeout is caught and the static
+      // fallback returned. The elapsed time is what proves the lowered budget was
+      // used: the default is 15000ms, so a regression to it blows the 2s bound.
+      assert("the budget constant, not the 15s default, bounds the tracker fetch",
+        Date.now() - startedAt < 2000);
+      assert("a hung tracker fetch resolves to the static fallback, not a rejection",
+        Array.isArray(settled) && settled.length === 0 &&
+        hangTrackerCtx.getBestTrackers().length === 0);
+    }, function () {
+      assert("a hung tracker fetch must not reject into the caller", false);
+    });
+  }).then(function () {
+    // retries/timeoutMs are consumed by fetchResilient and must never reach
+    // the platform fetch, which would ignore or reject unknown init keys.
+    let seenInit = null;
+    const initCtx = loadSrc(function (url, init) {
+      if (url.indexOf("ngosang/trackerslist") !== -1) {
+        seenInit = init;
+        return Promise.resolve({ status: 200, text: () => Promise.resolve("udp://a.example:6969/announce") });
+      }
+      return fakeFetch(url);
+    });
+    return initCtx.initBestTrackers().then(function () {
+      assert("retries and timeoutMs never leak into the fetch init",
+        seenInit && !("retries" in seenInit) && !("timeoutMs" in seenInit));
+      assert("the User-Agent is still sent to the tracker host",
+        seenInit && seenInit.headers && !!seenInit.headers["User-Agent"]);
+    });
+  }).then(function () {
+    return ctx.getStreams("122991", "tv", 1, 8);
+  }).then(function (res) {
     console.log("  integration results:", res.length);
     const hasSubs = res.some(r => /SubsPlease/.test(r.title));
     const hasEng = res.some(r => /Smoking Behind/.test(r.title));
@@ -369,6 +581,7 @@ function runOffline() {
     assert("integration result keeps provider and type", res.every(function (r) {
       return r.provider === "Nyaa" && r.type === "tv";
     }));
+  });
   });
 }
 
