@@ -315,34 +315,44 @@ The corpus went from "20 cases that all passed" to "52 cases the existing matche
 
 ### A.2 Matcher, after hardening
 
-`node nyaa-nuvio/bench.js` at commit `59906bb` plus the Task 2 review pins, over the 55-case corpus (21 positives, 34 negatives):
+`node nyaa-nuvio/bench.js` at commits `59906bb`, `9cafa5a`, `b2dfd4d`, `913e755`, over the 66-case corpus (27 positives, 39 negatives):
 
 | TP | FP | FN | TN | Precision | Recall | F1 |
 |---|---|---|---|---|---|---|
-| 21 | 0 | 0 | 34 | 1.000 | 1.000 | 1.000 |
+| 27 | 0 | 0 | 39 | 1.000 | 1.000 | 1.000 |
 
 Every case the matcher got wrong before is now correct, and the two suites that previously disagreed now agree. Each row below was confirmed by reverting that hunk alone and re-scoring the corpus, so the attribution is measured rather than asserted.
 
 | Fix | Cases cleared |
 |---|---|
 | `DASH_EP_PATTERN` widened to 1-4 digits with an optional `v\d+` revision suffix | 21, 22, 23, 24, 25, 26, 27, 48 |
+| Revision suffix required to be **glued** to the number, not whitespace-separated | 58, 59, 60 |
 | `dashIsRevision` — a 3-4 digit number carrying `v\d+` is a codec tag, not a re-encode | 50, and 49 alongside `looksLikeMetadata` |
 | `rawTitleSeason` reads the season off the raw title, before `cleanTorrentTitle` strips the parentheses that carry it | 28, 38 |
+| `RAW_SEASON_PATTERN` extended to English prefix ordinals (`2nd Season`, `(3rd Season)`) | 61, 62, 63 |
 | The `rawChain` branch gained the same title-declares-season guard | 53 |
 | The season-less episode guard now checks whether the *title* declares a season, not only the request | 40 |
-| New `S<n> - E<nn>` pattern with the season bound to the request | 29 |
+| `EPISODE_PATTERNS` collapsed from four S/E variants to one | 29 |
 | `looksLikeMetadata` in the trailing-number branch rejects years and resolutions | 43, 44, 45, 46, 47 |
 | `looksLikeMetadata` in the dash branch | 56, 57 |
+| `looksLikeMetadata` extended to the 360p and 4320/8K rungs | 64, 65 |
 
-Two branches were changed beyond the original plan: the `rawChain` branch (case 53), which carries the identical defect and can only remove matches, and the merge of two trailing-number branches that were byte-identical apart from their season test.
+**Two bugs the review caught in the fix itself.** Both are the same defect as an original finding, one token later, which is the argument for measuring rather than pattern-matching:
 
-**What widening the dash pattern cost.** `dashIsRevision` exists because widening `DASH_EP_PATTERN` to 1-4 digits would *newly* have matched `Show - 265v2` as episode 265, and `- 265v2` is a codec tag, not a release. Suppressing it by value would have meant refusing 264/265/266 outright, which costs a real `One Piece - 265`. Suppressing it by shape — 3-4 digits plus a `v\d+` suffix — declines the re-encode `One Piece - 265v2` instead. `One Piece - 265` still matches.
+- The `v\d+` suffix was originally matched with `\s*`, so a **stripped codec tag's dangling suffix** read as an episode revision. `cleanTorrentTitle` removes `x265`/`HEVC` but leaves the `v2`, so `[SubsPlease] One Piece - 1122 (1080p) [x265 v2].mkv` — the long-running-show case the digit widening exists to serve — did not match, while the same title with `[x265]` did. Requiring the suffix to be glued fixed it (cases 58-60).
+- `RAW_SEASON_PATTERN` required digits *before* `Season`, so `Show 2nd Season - 08` read as season-less and answered an S1E8 request with a Season 2 file. Postfix ordinals already worked; prefix ordinals did not (cases 61-63).
 
-To be precise about the direction of travel: **`Show - 265v2` did not match before Task 2 either.** The old 1-2 digit pattern could not reach it, so this is a prevented new false positive and a declined real-world match, **not** a regression of anything that previously worked. An earlier draft of this appendix called it a deliberate regression; that was wrong.
+**The year band is a hole in both directions, on purpose.** `looksLikeMetadata` treats 1900-2099 as a year. Measured on current code: `1899` → match, `1900` → no, `2099` → no, `2100` → **match**, `3000` → match. So the digit widening silently stops working for a long-runner once it passes 2099, and a four-digit absolute above that range reads as an episode. The trade is still right — the false positive being prevented is an S1E2024 request no show will generate, while the miss being risked is a real episode — and case 66 pins `1899` as a tripwire. This is a deliberate expiry, not an oversight. Anyone who believes long-running series will eventually cross 2100 should revisit the band, not the digit cap.
 
-**Known limitation, deliberately not fixed.** `[Group] Show [09v2] [1080p]` does not match an S1E9 request. `EPISODE_PATTERNS` has carried an `\[(\d+)v\d\]` entry for this shape, but `cleanTorrentTitle` strips every bracket before the pattern loop runs, so the entry is dead code. This is pre-existing, unrelated to Task 2's four root causes, and is recorded in `corpus.json` under `knownLimitations` rather than asserted, because asserting it would fail the gate. The dash form `- 09v2` does match, via cases 23-26.
+**What the digit widening costs.** `dashIsRevision` exists because widening `DASH_EP_PATTERN` to 1-4 digits would *newly* have matched `Show - 265v2` as episode 265, and `- 265v2` is a codec tag, not a release. Suppressing it by value would mean refusing 264/265/266 outright, costing a real `One Piece - 265`. Suppressing it by shape declines the re-encode `One Piece - 265v2` instead. `One Piece - 265` still matches.
 
-**On the non-string input caveat.** `matchEpisode` still throws if handed a non-string `title` or an object `season`/`episode`/`absolute`, because `cleanTorrentTitle` calls `.replace` unguarded. This is pre-existing and unchanged. It is unreachable from `getStreams`: `parseRssItems` gates on a truthy `item.title`, and the season and episode arrive as numbers. The zero-throw claim covers every reachable input, not every conceivable one.
+To be precise about direction of travel: **`Show - 265v2` did not match before Task 2 either.** The old 1-2 digit pattern could not reach it, so this is a prevented new false positive and a declined real-world match, **not** a regression of anything that previously worked. An earlier draft of this appendix called it a deliberate regression; that was wrong.
+
+**Known limitation, deliberately not fixed.** `[Group] Show [09v2] [1080p]` does not match an S1E9 request. `EPISODE_PATTERNS` has carried an `\[(\d+)v\d\]` entry for this shape, but `cleanTorrentTitle` strips every bracket before the pattern loop runs, so the entry is dead code. This is pre-existing, unrelated to Task 2's root causes, and is recorded in `corpus.json` under `knownLimitations` rather than asserted, because asserting it would fail the gate. The dash form `- 09v2` does match, via cases 23-26.
+
+**Test-suite coverage is uneven, and the corpus is doing the work.** Neutering `looksLikeMetadata` to `return false` breaks 3 of 45 `test.js` assertions and 9 corpus cases. Six of the original "guard:" assertions were decorative — they passed with the guard machinery deleted, because `cleanTorrentTitle` strips the very tokens they relied on (`2160p`, `x265`, `(2024)`) before any new code runs. They were reshaped to the bare forms the guards actually see. `dashIsRevision` still has no `test.js` coverage; corpus case 50 is its only guard. **`corpus.json`, not `test.js`, is the safety net for this change.**
+
+**On the non-string input caveat.** `matchEpisode` still throws if handed a non-string `title` or an object `season`/`episode`/`absolute`, because `cleanTorrentTitle` calls `.replace` unguarded. Pre-existing and unchanged. Unreachable from `getStreams`: `parseRssItems` gates on a truthy `item.title`, and season and episode arrive as numbers. A 147,465-input string fuzz returns a strict boolean with zero throws.
 
 ### A.3 Live end-to-end
 
