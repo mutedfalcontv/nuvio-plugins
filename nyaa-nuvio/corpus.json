@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-09-26",
-  "note": "Cases 01-20 mirror the assertions in test.js runOffline(). Cases 21-52 are independently frozen, harvested by probing matchEpisode with realistic Nyaa release names. Cases 53-55 were added after Task 2 to pin behaviour the implementation changed or left uncovered: 53 fails on the pre-Task-2 matcher, so adding it tightened the gate rather than relaxing it. Ground truth is not to be edited to make a matcher look good.",
-  "provenance": "01-20 from test.js; 21-42 probe-harvested matcher gaps and their guards; 43-47 bare year/resolution brackets, which survive cleanTorrentTitle and were being read as episodes; 48-52 guards for the digit and v-suffix widening; 53-55 post-implementation pins for the rawChain season guard, the trailing-number branch's positive path, and the Episodes-count token.",
+  "note": "Cases 01-20 mirror the assertions in test.js runOffline(). Cases 21-52 are independently frozen, harvested by probing matchEpisode with realistic Nyaa release names. Cases 53-57 were added after Task 2 to pin behaviour the implementation changed or left uncovered: 53 fails on the pre-Task-2 matcher, so adding it tightened the gate rather than relaxing it. Cases 58-66 were added after the Task 2 code review. Every one of them except 66 fails on the pre-review matcher, so each of those tightened the gate. 66 is a deliberate tripwire and NOT fix coverage: it pins the low edge of the year band, which already passed and will keep passing for as long as the 1900 ceiling stays where it is. Ground truth is not to be edited to make a matcher look good.",
+  "provenance": "01-20 from test.js; 21-42 probe-harvested matcher gaps and their guards; 43-47 bare year/resolution brackets, which survive cleanTorrentTitle and were being read as episodes; 48-52 guards for the digit and v-suffix widening; 53-55 post-implementation pins for the rawChain season guard, the trailing-number branch's positive path, and the Episodes-count token; 56-57 the dash branch's bare year and resolution forms; 58-60 the dangling codec-revision tag ('[x265 v2]' with the codec token already stripped) that cost a 3-4 digit episode its match; 61-63 the English prefix ordinal season ('2nd Season'), which read as season-less in both directions; 64-65 the 360 and 4320 rungs missing from the resolution ladder; 66 the year band's low edge, a tripwire rather than a fix case.",
   "cases": [
     { "id": "01-subsplease-s1-absolute", "title": "Super no Ura de Yani Suu Futari - 08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": true },
     { "id": "02-subsplease-s1-absolute-bare", "title": "Super no Ura de Yani Suu Futari - 08", "season": 1, "episode": 8, "absolute": null, "expect": true },
@@ -63,7 +63,17 @@
     { "id": "54-trailing-number-positive", "title": "[Group] Show 08 [1080p]", "season": 1, "episode": 8, "absolute": null, "expect": true },
     { "id": "55-neg-episodes-count-token", "title": "[Group] Show (12 Episodes) [1080p]", "season": 1, "episode": 12, "absolute": null, "expect": false },
     { "id": "56-neg-dash-branch-year", "title": "[Group] Show - 2024 (1080p)", "season": 1, "episode": 2024, "absolute": null, "expect": false },
-    { "id": "57-neg-dash-branch-resolution", "title": "[Group] Show - 2160 (1080p)", "season": 1, "episode": 2160, "absolute": null, "expect": false }
+    { "id": "57-neg-dash-branch-resolution", "title": "[Group] Show - 2160 (1080p)", "season": 1, "episode": 2160, "absolute": null, "expect": false },
+
+    { "id": "58-abs-4digit-dangling-codec-v2", "title": "[SubsPlease] Show - 265 (1080p) [x265 v2].mkv", "season": 1, "episode": 265, "absolute": null, "expect": true },
+    { "id": "59-abs-4digit-dangling-hevc-v2", "title": "[Group] Show - 265 (1080p) [HEVC v2]", "season": 1, "episode": 265, "absolute": null, "expect": true },
+    { "id": "60-abs-4digit-bare-v2-tag", "title": "[Group] Show - 265 (1080p) [v2]", "season": 1, "episode": 265, "absolute": null, "expect": true },
+    { "id": "61-ordinal-prefix-season", "title": "Show 2nd Season - 08 (1080p)", "season": 2, "episode": 8, "absolute": null, "expect": true },
+    { "id": "62-neg-ordinal-prefix-season-s1", "title": "Show 2nd Season - 08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": false },
+    { "id": "63-ordinal-prefix-season-parens", "title": "Show (2nd Season) - 08 (1080p)", "season": 2, "episode": 8, "absolute": null, "expect": true },
+    { "id": "64-neg-bare-360", "title": "Show - 360 (1080p)", "season": 1, "episode": 360, "absolute": null, "expect": false },
+    { "id": "65-neg-bare-4320-8k", "title": "Show - 4320 (8K)", "season": 1, "episode": 4320, "absolute": null, "expect": false },
+    { "id": "66-year-band-lower-edge-1899", "title": "[SubsPlease] One Piece - 1899 (1080p) [A1B2C3D4].mkv", "season": 1, "episode": 1899, "absolute": null, "expect": true }
   ],
   "knownLimitations": [
     "[Group] Show [09v2] [1080p] does not match S1E9. EPISODE_PATTERNS contains \\[(\\d+)v\\d\\] , but cleanTorrentTitle strips every bracket before the loop runs, so the pattern is dead code. Pre-existing, unchanged by Task 2, and not asserted here because asserting it would fail the gate. The dash form '- 09v2' does match (cases 23-26)."

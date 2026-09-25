@@ -27,10 +27,17 @@ var USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 var MAX_STREAMS = 40;
 
 var EPISODE_PATTERNS = [
-  { re: /S(\d+)\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
-  { re: /S(\d+)\s*\.\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
+  // One pattern for every "S<n> [sep] E<n>" spelling. The separator is optional,
+  // so S01E08, S01.E08 and S01 - E08 all land here, which is what the three
+  // former variants were doing between them.
+  //
+  // NO \b next to the "E": in "S01E08" the position between the season digits and
+  // the "E" is not a word boundary (both sides are word characters), so
+  // \s*[.\-–]?\s*\bE would stop matching the single most common S/E form in the
+  // corpus. A \b before "S" or after the episode digits is harmless, but there is
+  // no reason to add either.
+  { re: /S(\d+)\s*[.\-–]?\s*E(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /S(\d+)\s*[-–]\s*(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 },
-  { re: /\bS(\d{1,2})\s*[-–]\s*E(\d{1,3})\b/i, seasonGroup: 1, epGroup: 2 },
   { re: /Season\s+(\d+)\s+Episode\s+(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /(\d+)x(\d+)/i, seasonGroup: 1, epGroup: 2 },
   { re: /\[(\d+)\]$/i, seasonGroup: null, epGroup: 1 },
@@ -44,9 +51,24 @@ var EPISODE_PATTERNS = [
 // series (One Piece E1122). Group 2 captures an optional "v2"/"v3" revision
 // suffix so a re-encode of the same episode still matches. The trailing
 // (?![0-9a-z]) boundary replaces the old (?!\s*[pP]) guard and subsumes it: it
-// stops the match from landing mid-digit-run ("1122" must not be read as "11")
-// and from eating the stem of a "1080p"-style tag.
-var DASH_EP_PATTERN = /-\s*(\d{1,4})(\s*v\d+)?(?![0-9a-z])/i;
+// rejects a match that runs straight into the stem of a "1080p"-style tag, so
+// "- 1080" in an unstripped title cannot be read as episode 1080.
+//
+// That lookahead is NOT what keeps "1122" from being read as "11" - \d{1,4} is
+// greedy and nothing in this pattern forces a backtrack, so 4 digits are taken
+// whole. The digit cap is the thing protecting a long-running show's number, so
+// relaxing it (not the lookahead) is what would break "One Piece - 1122".
+//
+// The revision suffix must be GLUED to the number ("- 09v2", never "- 09 v2").
+// cleanTorrentTitle strips the codec token out of a tag like "[x265 v2]" but
+// leaves the "v2" behind, so "[SubsPlease] Show - 265 (1080p) [x265 v2]" cleans
+// to "Show - 265 v2": with \s* in front of the suffix, the orphan "v2" was
+// captured as a revision, dashIsRevision fired on a 3-digit episode, and the
+// release was dropped. That voided the whole point of the 4-digit widening for
+// exactly the shows that needed it. With the glue required, a stripped codec
+// tag no longer costs the match, and the cost is only that a hand-written
+// "Show - 265 v2" now reads as episode 265 - which no release group writes.
+var DASH_EP_PATTERN = /-\s*(\d{1,4})(v\d+)?(?![0-9a-z])/i;
 var BATCH_PATTERN = /\b(batch|complete|season\s+\d+\s+pack)\b/i;
 var RANGE_PATTERN = /S(\d+)\s*E(\d+)\s*[-–]\s*E?(\d+)/i;
 var RES_PATTERN = /\b(4K|2160p|1080p|720p|480p|360p)\b/i;
@@ -65,22 +87,45 @@ var SEASON_TOKEN_PATTERN = /\bS\s*(\d+)|Season\s+(\d+)/i;
 // has to be consulted. Stricter than SEASON_TOKEN_PATTERN on the "S<n>" arm (it
 // requires a real word boundary, so "S03E09" falls through to the cleaned-title
 // fallback) and looser on the spelled-out arm ("Season.2", "Season2", "Saison").
-var RAW_SEASON_PATTERN = /(?:^|[^A-Za-z0-9])(?:S(\d{1,2})\b|(?:Season|Saison)[.\s_-]?(\d{1,2})\b)/i;
+//
+// The third arm is the English prefix ordinal, "2nd Season" / "3rd Season". The
+// other two arms need digits BEFORE the word "Season", so a prefix ordinal
+// slipped past and the title read as season-less - which is wrong in both
+// directions: "Show 2nd Season - 08" missed S2E8 entirely AND answered an S1E8
+// request with a season-2 file. Same defect the "(Season 2)" arm fixed, one
+// token later. The ordinal goes in its own group because it comes first.
+var RAW_SEASON_PATTERN = /(?:^|[^A-Za-z0-9])(?:S(\d{1,2})\b|(?:Season|Saison)[.\s_-]?(\d{1,2})\b|(\d{1,2})(?:st|nd|rd|th)\s+(?:Season|Saison)\b)/i;
 
 function rawTitleSeason(title) {
   var m = String(title || "").match(RAW_SEASON_PATTERN);
   if (!m) return null;
-  return parseInt(m[1] || m[2], 10);
+  return parseInt(m[1] || m[2] || m[3], 10);
 }
 
 // Numbers that are never episode numbers, in either of the two digit-tolerant
-// branches. A 4-digit group in the 19xx/20xx range is a year; 480/720/1080/
-// 1440/2160 are resolutions. cleanTorrentTitle only strips the "p" forms
+// branches. A 4-digit group in the 19xx/20xx range is a year; 360/480/720/1080/
+// 1440/2160/4320 are resolutions. cleanTorrentTitle only strips the "p" forms
 // ("1080p"), never a bare "1080" or a "[2024]" year, so all of these survive
-// cleaning and land in the dash and trailing-number branches.
+// cleaning and land in the dash and trailing-number branches. The resolution
+// ladder is deliberately the full set RES_PATTERN and cleanTorrentTitle already
+// know about - a rung missing here is a rung those two strip on the way in and
+// this one has to catch on the way out. 360 and 4320 were the two holes: "360p"
+// is stripped as a resolution but a bare "- 360" was read as episode 360, and
+// "4K" is known to parseQuality but a bare "- 4320" was read as episode 4320.
+//
+// The 2099 ceiling on the year band is a deliberate expiry, not an oversight,
+// and it cuts both ways. Downwards it costs us: the moment a long-runner
+// crosses 1900 episodes ("One Piece - 1900" and up) every one of its releases
+// silently stops matching, because 1900..2099 is exactly the set the band
+// filters. Upwards it buys us: from 2100 the band stops filtering, so "One Piece
+// - 2100" is read as an episode again. The trade is still right - the false
+// positive the band prevents is an S1E2024 request no show will ever generate,
+// while the miss it risks is a real episode - but the expiry is a real cliff
+// and the day One Piece ships episode 1900 this band has to move.
 function looksLikeMetadata(n) {
   return (n >= 1900 && n <= 2099) ||
-    n === 480 || n === 720 || n === 1080 || n === 1440 || n === 2160;
+    n === 360 || n === 480 || n === 720 || n === 1080 || n === 1440 ||
+    n === 2160 || n === 4320;
 }
 
 // ---- Network helpers (ported from nuvio-torlink-addon, Hermes-safe) ----
@@ -594,14 +639,18 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
   if (dashMatch) {
     var dashEp = parseInt(dashMatch[1], 10);
     // A revision suffix is a fansub re-encode marker and only ever rides on a
-    // low episode number ("09v2", "12v3"). On a 3-4 digit number the same
-    // "- 265v2" shape is a codec or resolution tag that lost its leading "x", so
-    // reject it as a revision rather than blanket-refusing 265 outright - "One
-    // Piece - 265" is a real episode.
+    // low episode number ("09v2", "12v3"). DASH_EP_PATTERN now requires the
+    // suffix to be glued, so the only 3-4 digit shape reaching this line is one
+    // typed as "- 265v2": a codec or resolution tag that lost its leading "x",
+    // not a fansub revision. Those are still rejected as revisions rather than
+    // blanket-refusing 265 outright, because "One Piece - 265" is a real episode.
+    // The case that used to fire here is gone: "[x265 v2]", whose codec token
+    // cleanTorrentTitle had already stripped, leaving an orphan "v2" that \s*
+    // read as a revision and cost a real 3-digit episode its match.
     var dashIsRevision = !!dashMatch[2] && dashEp >= 100;
     // Skip the candidate rather than returning false, so a title the dash pattern
     // cannot speak for still reaches the branches below. Note that a genuine batch
-    // is already gone by this point - nyaa.js:536 returns false for anything
+    // is already gone by this point - nyaa.js:581 returns false for anything
     // BATCH_PATTERN matches - so this fall-through is about the episode branches,
     // not about rescuing batches.
     if (!dashIsRevision && !looksLikeMetadata(dashEp)) {
@@ -614,7 +663,13 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
         // Absolute "- 08" with no season token (SubsPlease S1).
         return true;
       } else if (!isNaN(abs) && dashEp === abs) {
-        // Absolute "- 15" (Bookworm S2 absolute numbering).
+        // Absolute "- 15" (Bookworm S2 absolute numbering). Unlike the trailing
+        // branch below this does not test reqSeason !== 1, and that asymmetry is
+        // deliberate: getAbsoluteEpisode returns null for season <= 1, so abs is
+        // only ever non-null for a season > 1 request and the guard would be
+        // unreachable. Reached directly (abs supplied by a caller), the title's
+        // own dash number still has to equal abs, so the looser test cannot
+        // answer an S1 request with a season-1 file.
         return true;
       }
     }
@@ -638,18 +693,12 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
     }
   }
 
-  var isBatch = BATCH_PATTERN.test(cleaned);
-  if (isBatch) {
-    var batchSeasonMatch = cleaned.match(/\bSeason\s+(\d+)\b/i);
-    if (!batchSeasonMatch) {
-      batchSeasonMatch = cleaned.match(/S(\d+)/i);
-    }
-    if (batchSeasonMatch) {
-      var batchSeason = parseInt(batchSeasonMatch[1], 10);
-      if (batchSeason === reqSeason) return true;
-    }
-  }
-
+  // A batch/complete/season-pack was returned false at the top of this function
+  // (nyaa.js:581, the BATCH_PATTERN test on `cleaned`), and `cleaned` is never
+  // reassigned after it, so BATCH_PATTERN cannot start matching again down here.
+  // The re-test that used to sit at this point was dead code, and nothing in the
+  // corpus would have noticed either way: every batch case is a negative, so the
+  // dead block could only ever have returned true for a title already rejected.
   return false;
 }
 

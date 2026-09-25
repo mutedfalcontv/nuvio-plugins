@@ -125,12 +125,18 @@ function runOffline() {
     ctx.matchEpisode("[EngSub] Show S2 - E08 (1080p)", 2, 8, null) === true);
 
   // Guards. Each of these is a way the widened branches could go wrong.
-  assert("guard: resolution is not an episode",
-    ctx.matchEpisode("[Group] Show S01E08 1080p 2160p HEVC x265", 1, 2160, null) === false);
-  assert("guard: codec number is not an episode",
-    ctx.matchEpisode("[Group] Show S01E08 1080p x265 10bit", 1, 265, null) === false);
-  assert("guard: year is not an episode",
-    ctx.matchEpisode("[Group] Movie (2024) [1080p] [x264]", 1, 2024, null) === false);
+  // The three resolution/year guards below are spelled as BARE numbers after a
+  // dash, which is the only form looksLikeMetadata ever sees: cleanTorrentTitle
+  // strips "2160p", "x265" and "(2024)" before any guard runs, so the decorated
+  // spellings of these same cases tested cleanTorrentTitle, not the guard (and
+  // passed with the guard stubbed out entirely). The decorated spellings are
+  // still covered as corpus cases 34-36 and 43-47.
+  assert("guard: bare 2160 is not an episode",
+    ctx.matchEpisode("[Group] Show - 2160 (1080p)", 1, 2160, null) === false);
+  assert("guard: bare 1080 is not an episode",
+    ctx.matchEpisode("[Group] Show - 1080 (1080p)", 1, 1080, null) === false);
+  assert("guard: year after the dash is not an episode",
+    ctx.matchEpisode("[Group] Show - 2024 (1080p)", 1, 2024, null) === false);
   assert("guard: v2 suffix does not shift the episode",
     ctx.matchEpisode("[SubsPlease] Show - 09v2 (1080p)", 1, 8, null) === false);
   assert("guard: v2 suffix does not concatenate to 80",
