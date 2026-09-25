@@ -151,6 +151,58 @@ function runOffline() {
   assert("guard: raw bracket chain honours the title's season",
     ctx.matchEpisode("[Group] Show S2 [08][WebRip][HEVC_AAC]", 1, 8, null) === false);
 
+  // ---- Part A1: anime tracker set, MAX_TRACKERS cap, tail-only eviction ----
+  const ANIME = [
+    "http://nyaa.tracker.wf:7777/announce",
+    "http://anidex.moe:6969/announce",
+    "http://tracker.anirena.com:80/announce",
+    "udp://tracker.uw0.xyz:6969/announce"
+  ];
+  function hasAllAnime(list) {
+    for (var ai = 0; ai < ANIME.length; ai++) if (list.indexOf(ANIME[ai]) === -1) return false;
+    return true;
+  }
+
+  const merged = ctx.mergeTrackers([]);
+  assert("mergeTrackers includes all 4 anime trackers", hasAllAnime(merged));
+  assert("mergeTrackers keeps legacy generic trackers", merged.indexOf("udp://tracker.opentrackr.org:1337/announce") !== -1);
+  assert("mergeTrackers default length is 14", merged.length === 14);
+  assert("mergeTrackers anime block leads the list",
+    merged[0] === ANIME[0] && merged[1] === ANIME[1] && merged[2] === ANIME[2] && merged[3] === ANIME[3]);
+
+  // Live list under the cap: it slots in after the anime block, generic fills the rest.
+  const twoBest = ["udp://tracker.one.example:6969/announce", "udp://tracker.two.example:451/announce"];
+  const underCap = ctx.mergeTrackers(twoBest);
+  assert("mergeTrackers live entries follow the anime block",
+    underCap[0] === ANIME[0] && underCap[4] === twoBest[0] && underCap.length === 16);
+
+  // Over the cap: eviction must come off the tail, never off the anime set.
+  const many = [];
+  for (let mi = 0; mi < 40; mi++) many.push("udp://best" + mi + ".example:6969/announce");
+  const capped = ctx.mergeTrackers(many);
+  assert("mergeTrackers caps at 25", capped.length === 25);
+  assert("mergeTrackers never evicts anime trackers under cap pressure", hasAllAnime(capped));
+  assert("mergeTrackers anime block comes first", capped[0] === "http://nyaa.tracker.wf:7777/announce");
+  assert("mergeTrackers evicts the generic tail, not the anime set",
+    capped.indexOf("udp://tracker.opentrackr.org:1337/announce") === -1);
+
+  // A live list that repeats an anime tracker must not cost a slot or an entry.
+  const dupes = ctx.mergeTrackers(ANIME.concat(ANIME).concat(["udp://best.example:6969/announce"]));
+  assert("mergeTrackers dedupes live anime repeats",
+    dupes.length === 15 && hasAllAnime(dupes) && dupes[4] === "udp://best.example:6969/announce");
+
+  const magnet = ctx.buildMagnet("AAA11111111111111111111111111111111111111", "Some Title");
+  assert("buildMagnet keeps the announce prefix and hash verbatim",
+    magnet.indexOf("magnet:?xt=urn:btih:AAA11111111111111111111111111111111111111&dn=") === 0);
+  assert("buildMagnet embeds anime tracker", magnet.indexOf(encodeURIComponent("http://nyaa.tracker.wf:7777/announce")) !== -1);
+  const trCount = magnet.split("&tr=").length - 1;
+  assert("buildMagnet tracker count within cap", trCount <= 25 && trCount >= 14);
+  assert("buildMagnet has no duplicate tracker params", (function () {
+    const trs = magnet.split("&tr=").slice(1);
+    for (let t = 0; t < trs.length; t++) if (trs.indexOf(trs[t]) !== t) return false;
+    return true;
+  })());
+
   // ---- integration (mocked fetch): SubsPlease + English both returned ----
   return ctx.getStreams("122991", "tv", 1, 8).then(function (res) {
     console.log("  integration results:", res.length);

@@ -11,6 +11,55 @@ var TRACKERS = [
   "udp://open.demonii.com:1337/announce"
 ];
 
+// Anime-specific swarms. Generic trackers carry almost no anime peers, so these
+// are what actually make a magnet find leechers. Ported from Torrentio's
+// addon/lib/magnetHelper.js (ANIME_TRACKERS).
+var TRACKERS_ANIME = [
+  "http://nyaa.tracker.wf:7777/announce",
+  "http://anidex.moe:6969/announce",
+  "http://tracker.anirena.com:80/announce",
+  "udp://tracker.uw0.xyz:6969/announce"
+];
+
+// Stremio-style clients only reliably honour a bounded tracker list, so the
+// merged list is trimmed to this many announce URLs.
+var MAX_TRACKERS = 25;
+
+// Order: anime set first, then live best trackers, then the legacy generic set.
+// Anime goes first deliberately — if the best-tracker list went first it could
+// consume all MAX_TRACKERS slots alone and silently drop the anime trackers,
+// which are the whole point for this plugin. Eviction happens from the tail
+// only, so the anime block is unconditional: it is pushed before the cap is
+// consulted, and the two lists that follow are both bounded by the room left
+// over. Push order is therefore the eviction order, and the cap can only ever
+// take entries from the end.
+function mergeTrackers(best) {
+  var out = [];
+  var seen = {};
+  function push(t) {
+    if (t && !seen[t]) { seen[t] = true; out.push(t); }
+  }
+
+  for (var a = 0; a < TRACKERS_ANIME.length; a++) push(TRACKERS_ANIME[a]);
+
+  var bestList = best || [];
+  var room = MAX_TRACKERS - out.length;
+  for (var b = 0; b < bestList.length && b < room; b++) push(bestList[b]);
+
+  for (var g = 0; g < TRACKERS.length && out.length < MAX_TRACKERS; g++) push(TRACKERS[g]);
+
+  return out;
+}
+
+var bestTrackersCache = null;
+
+// Returns the live best-tracker list if it has been fetched, otherwise an empty
+// list. Populated by initBestTrackers(); the stub keeps buildMagnet correct
+// before that fetch lands.
+function getBestTrackers() {
+  return bestTrackersCache || [];
+}
+
 var NYAA_CATEGORIES = {
   ALL: "1_0",
   ENGLISH: "1_2"
@@ -715,8 +764,9 @@ function parseQuality(title) {
 function buildMagnet(infoHash, title) {
   var encodedName = encodeURIComponent(title.replace(/\[[^\]]*\]/g, "").trim());
   var magnet = "magnet:?xt=urn:btih:" + infoHash + "&dn=" + encodedName;
-  for (var ti = 0; ti < TRACKERS.length; ti++) {
-    magnet += "&tr=" + encodeURIComponent(TRACKERS[ti]);
+  var trackers = mergeTrackers(getBestTrackers());
+  for (var ti = 0; ti < trackers.length; ti++) {
+    magnet += "&tr=" + encodeURIComponent(trackers[ti]);
   }
   return magnet;
 }
