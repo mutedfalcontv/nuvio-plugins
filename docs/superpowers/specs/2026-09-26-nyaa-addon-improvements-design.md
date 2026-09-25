@@ -105,12 +105,14 @@ Multi Subs
 `buildMagnet()` (`nyaa.js:608`) currently appends 10 trackers. With the anime set and Part B it could exceed 25. Rule: build the ordered list as
 
 ```
-[merged best trackers (Part B, if available)]  -> capped
-+ [anime set]                                    -> always all 4
-+ [existing generic 10]                          -> trimmed to reach MAX_TRACKERS = 25
+[anime set]                                  -> always all 4, never evicted
++ [live best trackers (Part B, if available)] -> trimmed to remaining room
++ [existing generic 10]                       -> trimmed to reach MAX_TRACKERS = 25
 ```
 
-Order matters: the live best trackers are the healthiest, then anime-specific, then generic. Deterministic given the same inputs, which keeps Part 4 measurements comparable.
+The anime set goes first on purpose. If the live best list were first it could consume all 25 slots on its own and silently drop the anime trackers, which are the entire point of Part A for this plugin. Eviction happens from the tail, never from the anime set.
+
+Order matters for the rest: live best trackers are the healthiest of the remainder, generic trackers fill whatever is left. The result is deterministic for identical inputs, which keeps Stage 4 measurements comparable.
 
 ### 3.3 Part B — live best trackers
 
