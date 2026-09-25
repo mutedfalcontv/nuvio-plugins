@@ -1,7 +1,7 @@
 {
   "generatedAt": "2026-09-26",
-  "note": "Cases 01-20 mirror the assertions in test.js runOffline(). Cases 21-52 are independently frozen, harvested by probing matchEpisode with realistic Nyaa release names; they have no test.js counterpart. Ground truth is not to be edited to make a matcher look good.",
-  "provenance": "01-20 from test.js; 21-42 probe-harvested matcher gaps and their guards; 43-47 bare year/resolution brackets, which survive cleanTorrentTitle and were being read as episodes; 48-52 guards for the digit and v-suffix widening.",
+  "note": "Cases 01-20 mirror the assertions in test.js runOffline(). Cases 21-52 are independently frozen, harvested by probing matchEpisode with realistic Nyaa release names. Cases 53-55 were added after Task 2 to pin behaviour the implementation changed or left uncovered: 53 fails on the pre-Task-2 matcher, so adding it tightened the gate rather than relaxing it. Ground truth is not to be edited to make a matcher look good.",
+  "provenance": "01-20 from test.js; 21-42 probe-harvested matcher gaps and their guards; 43-47 bare year/resolution brackets, which survive cleanTorrentTitle and were being read as episodes; 48-52 guards for the digit and v-suffix widening; 53-55 post-implementation pins for the rawChain season guard, the trailing-number branch's positive path, and the Episodes-count token.",
   "cases": [
     { "id": "01-subsplease-s1-absolute", "title": "Super no Ura de Yani Suu Futari - 08 (1080p)", "season": 1, "episode": 8, "absolute": null, "expect": true },
     { "id": "02-subsplease-s1-absolute-bare", "title": "Super no Ura de Yani Suu Futari - 08", "season": 1, "episode": 8, "absolute": null, "expect": true },
@@ -57,6 +57,13 @@
     { "id": "49-neg-v-suffix-1080", "title": "[Group] Show - 1080v2 [HEVC]", "season": 1, "episode": 1080, "absolute": null, "expect": false },
     { "id": "50-neg-v-suffix-265", "title": "[Group] Show - 265v2 [HEVC]", "season": 1, "episode": 265, "absolute": null, "expect": false },
     { "id": "51-neg-tenbit", "title": "[Group] Show S01E08 1080p x265 10bit", "season": 1, "episode": 10, "absolute": null, "expect": false },
-    { "id": "52-neg-untagged-range", "title": "[Erai-raws] Show - 01 ~ 12 [1080p][Multi-Subs]", "season": 1, "episode": 5, "absolute": null, "expect": false }
+    { "id": "52-neg-untagged-range", "title": "[Erai-raws] Show - 01 ~ 12 [1080p][Multi-Subs]", "season": 1, "episode": 5, "absolute": null, "expect": false },
+
+    { "id": "53-neg-rawchain-titled-season", "title": "[Group] Show S2 [08][WebRip][HEVC_AAC]", "season": 1, "episode": 8, "absolute": null, "expect": false },
+    { "id": "54-trailing-number-positive", "title": "[Group] Show 08 [1080p]", "season": 1, "episode": 8, "absolute": null, "expect": true },
+    { "id": "55-neg-episodes-count-token", "title": "[Group] Show (12 Episodes) [1080p]", "season": 1, "episode": 12, "absolute": null, "expect": false }
+  ],
+  "knownLimitations": [
+    "[Group] Show [09v2] [1080p] does not match S1E9. EPISODE_PATTERNS contains \\[(\\d+)v\\d\\] , but cleanTorrentTitle strips every bracket before the loop runs, so the pattern is dead code. Pre-existing, unchanged by Task 2, and not asserted here because asserting it would fail the gate. The dash form '- 09v2' does match (cases 23-26)."
   ]
 }
