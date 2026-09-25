@@ -13,8 +13,10 @@
 > **Superseded decision.** This plan originally vendored `parse-torrent-title@3.0.1` as a flag-gated second matcher. That was built and then measured, and it resolved **zero** of the 8 real matcher gaps — PTT has no bare-number handler, so every one of them fell back to `matchEpisode` anyway. Part C is now matcher hardening. See spec 3.4.
 
 **Ground rules for every task:**
-- The plugin is loaded by a `vm` context that only provides: `console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent, String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON, fetch, module, global`. **Do not use `parseFloat`, `Array.isArray`, `Object.assign`, template literals, or optional chaining in `nyaa.js`** — they will be `undefined` in the sandbox and in Hermes. Use `typeof x !== "undefined"` guards for any new global.
+- The plugin is loaded by a `vm` context that only provides: `console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent, String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON, fetch, module, global`. **Do not use `parseFloat`, `Array.isArray`, `Object.assign`, template literals, or optional chaining in `nyaa.js`** — they will be `undefined` in the sandbox and in Hermes. Use `typeof x !== "undefined"` guards for any new global. This constraint is enforced by review, not by the test harness: `vm.createContext` always provides a full ES realm, so `test.js` and `bench.js` will happily accept a change that breaks the real runtime. Treat the global list as a hard manual check at review time.
+- `matchEpisode` must not throw. It is called inside `getStreams`' single try block, whose catch returns `[]` — so a throw discards every stream accumulated for the whole query loop and the search silently returns nothing. `bench.js --gate` treats any throw as a failure for this reason.
 - `node nyaa-nuvio/test.js` must print `ALL TESTS PASSED` (exit 0) after every task.
+- `node nyaa-nuvio/bench.js --gate` must exit 0 after Task 2 and every task after it. Gate condition: `fp === 0 && fn === 0 && thrown === 0`.
 - Commit after every task. Never amend.
 
 ---
@@ -23,8 +25,10 @@
 
 The 20 cases committed earlier were mirrored from `test.js`, which the pre-existing matcher already passes 10/10 (F1 1.000). That made the old gate `hybrid F1 > current F1` unsatisfiable — nothing beats 1.000 — and it meant the corpus could only ever prove non-regression. This task adds the discriminating cases and makes the gate reachable.
 
+The corpus ended at 52 cases, not the 22 originally planned. Code review found that the first batch of "token collision" guards (ids 34-37) could not fail under *any* digit widening, because `cleanTorrentTitle` deletes the tokens they exist to guard. Probing the shapes where the collision is actually live found **five live pre-existing false positives** — a bare year or a bare resolution surviving cleaning and being read as an absolute episode number — which no planned case covered. Those were added before Task 2 started, deliberately: adding ground truth after seeing the fix is exactly what the "do not tune `expect` values" rule exists to prevent.
+
 **Files:**
-- Modify: `nyaa-nuvio/corpus.json` (append 22 cases)
+- Modify: `nyaa-nuvio/corpus.json` (append 32 cases: ids 21-52)
 - Modify: `nyaa-nuvio/bench.js` (single matcher, honest gate)
 
 - [ ] **Step 1: Append 9 positives to `corpus.json`**
@@ -144,9 +148,11 @@ if (process.argv.indexOf("--gate") !== -1) process.exit(ok ? 0 : 1);
 - [ ] **Step 4: Record the BEFORE score**
 
 Run: `node nyaa-nuvio/bench.js`
-Expected: **exactly 9 false negatives** (ids `21` through `29`) and **2 false positives** (`38-neg-parenthesised-season-s1`, `40-neg-spaced-s2-not-s1`). Precision 0.833, recall 0.526, F1 0.645. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 6.
+Expected: **exactly 10 false negatives** (ids `21` through `29`, plus `48-abs-4digit-bracketed`) and **7 false positives** (`38`, `40`, and `43` through `47`). Precision 0.588, recall 0.500, F1 0.541. This is the number Part C has to beat. Copy the full output into the spec appendix — you will need it verbatim in Task 6.
 
-The 2 false positives are pre-existing matcher bugs that this corpus newly exposed, not corpus errors. A title explicitly marked `(Season 2)` currently satisfies an S1 request, and `S2 - E08` currently satisfies an S1E8 request — both would open the wrong file. They are in scope for Task 2 and share a root cause with two of the misses, so the same fix clears them.
+If the counts differ, do **not** adjust the corpus to match the expectation. A surprise here is information: it means either a case is unreachable in the way you think, or `matchEpisode` is worse than believed. Report the delta before continuing.
+
+The 7 false positives are pre-existing matcher bugs that this corpus newly exposed, not corpus errors, and they are the serious part of this task. Two are season confusion — a title explicitly marked `(Season 2)` satisfies an S1 request, and `S2 - E08` satisfies an S1E8 request. Five are worse: a bare year or a bare resolution survives `cleanTorrentTitle` and is read as an absolute episode number, so an S1E2024 request returns `[Group] Show [2024] [1080p] [x265].mkv`. The addon has no way to tell the user it guessed. All seven open the wrong file and all are in scope for Task 2.
 
 - [ ] **Step 5: Confirm the existing suite is still green**
 
@@ -229,6 +235,31 @@ Find `DASH_EP_PATTERN` in the constants block near the top of `nyaa.js`. It curr
 // revision suffix so a re-encode of the same episode still matches.
 var DASH_EP_PATTERN = /-\s+(\d{1,4})\s*(?:v\d+)?(?![0-9a-z])/i;
 ```
+
+Widening this pattern is what makes cases 43-47 reachable, so read Step 3a before Step 6 and run the gate after each. Case 45 (`Show [1080] [HEVC]` at S1E1080) is the specific trap: `1080` has no `p`, so `cleanTorrentTitle`'s resolution list never removes it, and a bare trailing number in a 4-digit-tolerant branch is indistinguishable from an absolute episode number.
+
+- [ ] **Step 3a: Reject years and resolutions as episode numbers**
+
+A bare 4-digit number at the end of a cleaned title is usually a year, and a bare 3- or 4-digit number is often a resolution. `cleanTorrentTitle` removes `4K|2160p|1080p|720p|480p|360p` but nothing removes a year in `[2024]`, or a resolution written without its `p`. Today the trailing-number branch reads both as absolute episode numbers, so an S1E2024 request happily returns `[Group] Show [2024] [1080p] [x265].mkv` — an unrelated file, with nothing in the response to tell the user it guessed.
+
+Add a small predicate in the constants block, next to `DASH_EP_PATTERN`:
+
+```javascript
+// Numbers that are never episode numbers. A 4-digit group in the 19xx/20xx
+// range is a year; 480/720/1080/1440/2160 are resolutions. Release groups write
+// both bare and bracketed, and cleanTorrentTitle only strips the "p" forms, so
+// these survive cleaning and land in the digit-tolerant branches.
+function looksLikeMetadata(n) {
+  return (n >= 1900 && n <= 2099) ||
+    n === 480 || n === 720 || n === 1080 || n === 1440 || n === 2160;
+}
+```
+
+Then call it from **both** places that can now accept a 4-digit episode: the dash branch and the Rakun trailing-number branch. Reject the candidate and fall through to the next pattern rather than returning `false` outright — a title like `Show - 2024 [1080p]` is a batch, and the `[BATCH]` handler further down should still see it.
+
+Read the branch structure before editing. If a branch `return`s on a digit match, the guard has to sit *before* the match commits, not after. Case 21 (`One Piece - 1122`) must still match at S1E1122, so the predicate is on the candidate's value, never on its digit count alone — `1122` is inside neither range.
+
+Cases 49 and 50 (`Show - 1080v2`, `Show - 265v2`) guard the `v\d` suffix: `265` is a codec number and must stay a non-match, and `1080v2` must not become a 1080-resolution release. If the `v2` suffix in Step 3 lets either through, the suffix needs the same treatment.
 
 - [ ] **Step 4: Read the season off the RAW title, not the cleaned one**
 

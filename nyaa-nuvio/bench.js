@@ -1,5 +1,5 @@
 // Corpus scorer for the nyaa matcher. Run:  node nyaa-nuvio/bench.js
-// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 if precision or recall < 1.0)
+// Gate: node nyaa-nuvio/bench.js --gate   (exit 1 on any miss, false positive, or throw)
 //
 // Scores the single in-file matchEpisode(). The before/after comparison is taken
 // across commits, not across matchers: record this output, make the change, run
@@ -11,8 +11,12 @@ const path = require("path");
 const SRC = fs.readFileSync(path.join(__dirname, "nyaa.js"), "utf8");
 const CORPUS = JSON.parse(fs.readFileSync(path.join(__dirname, "corpus.json"), "utf8"));
 
-// Mirrors the restricted context Nuvio hands the plugin, so the bench measures
-// the same code path the real runtime executes.
+// Same restricted context as test.js, so the bench and the offline suite cannot
+// drift apart. It is NOT the production sandbox: vm.createContext always provides
+// a full ES realm, so the allowlist below only strips host globals (process,
+// require, Buffer, setInterval, URL, performance, crypto) and cannot catch a
+// plugin that reaches for parseFloat or Object.assign. The ES5-only constraint is
+// enforced by review, not by this harness.
 const ctx = {
   console, setTimeout, clearTimeout, encodeURIComponent, decodeURIComponent,
   String, parseInt, isNaN, Math, Promise, RegExp, Object, Array, Error, JSON,
@@ -31,6 +35,12 @@ if (typeof ctx.matchEpisode !== "function") {
 let tp = 0, fp = 0, fn = 0, tn = 0;
 const missed = [], falsePositives = [], thrown = [];
 
+// "S1E8" / "S1E1122" / "S1 abs 25" - enough of a request to act on from a log line.
+function requestLabel(c) {
+  if (c.absolute !== null && c.absolute !== undefined) return "S" + c.season + " abs " + c.absolute;
+  return "S" + c.season + "E" + c.episode;
+}
+
 for (const c of CORPUS.cases) {
   let got, err = null;
   try {
@@ -40,12 +50,12 @@ for (const c of CORPUS.cases) {
     err = e;
   }
   if (c.expect && got) tp++;
-  else if (!c.expect && got) { fp++; falsePositives.push(c.id + " matched but should be rejected"); }
-  else if (c.expect && !got) { fn++; missed.push(c.id); }
+  else if (!c.expect && got) { fp++; falsePositives.push(c.id + "  " + requestLabel(c) + "  " + c.title); }
+  else if (c.expect && !got) { fn++; missed.push(c.id + "  " + requestLabel(c) + "  " + c.title); }
   else tn++;
-  // Reported separately: a throw is already counted as FN or TN by the cascade
-  // above, so listing it here too would desync the header count from the FP tally.
-  if (err) thrown.push(c.id + " threw: " + (err.message || err));
+  // A throw is scored once, above, as either FN or TN. This list is diagnostic
+  // only, so a throwing positive appears under both headings by design.
+  if (err) thrown.push(c.id + "  " + (err.message || err));
 }
 
 const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
@@ -57,22 +67,28 @@ console.log("TP " + tp + "  FP " + fp + "  FN " + fn + "  TN " + tn);
 console.log("precision " + precision.toFixed(3) + "   recall " + recall.toFixed(3) + "   F1 " + f1.toFixed(3));
 
 if (missed.length) {
-  console.log("\nfalse negatives (" + missed.length + ") - real releases we failed to match:");
+  console.log("\nfalse negatives (" + missed.length + ") - id  request  title");
   for (const id of missed) console.log("  " + id);
 }
 if (falsePositives.length) {
-  console.log("\nfalse positives (" + falsePositives.length + ") - things we matched that must not match:");
+  console.log("\nfalse positives (" + falsePositives.length + ") - id  request  title");
   for (const s of falsePositives) console.log("  " + s);
 }
 if (thrown.length) {
-  console.log("\nthrew (" + thrown.length + ") - matchEpisode raised on these; scored as non-match:");
+  console.log("\nthrew (" + thrown.length + ") - scored as non-match, but a throw is a gate failure:");
   for (const s of thrown) console.log("  " + s);
 }
 
-const ok = precision === 1 && recall === 1;
+// Throws gate as hard as a miss. matchEpisode is called inside getStreams' single
+// try block (nyaa.js:214, catch at :247 returns []), so a throw discards every
+// stream accumulated for the whole query loop - the search silently returns
+// nothing. A matcher that crashes on an unrecognised title shape must not be
+// able to pass a gate that only counts true/false.
+const ok = fp === 0 && fn === 0 && thrown.length === 0;
 console.log("\n" + (ok
-  ? "GATE PASS: precision 1.000, recall 1.000, zero false negatives, zero false positives"
+  ? "GATE PASS: precision 1.000, recall 1.000, zero false negatives, zero false positives, zero throws"
   : "GATE FAIL: precision " + precision.toFixed(3) + ", recall " + recall.toFixed(3) +
-    ", FN " + fn + ", FP " + fp));
+    ", FN " + fn + ", FP " + fp +
+    (thrown.length ? ", threw " + thrown.length : "")));
 
 if (process.argv.indexOf("--gate") !== -1) process.exit(ok ? 0 : 1);

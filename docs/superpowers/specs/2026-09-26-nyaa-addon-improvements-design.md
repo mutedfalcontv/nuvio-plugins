@@ -263,34 +263,49 @@ Each part is an isolated block. A, B, and C can be reverted independently, in an
 
 ### A.1 Matcher, before hardening
 
-`node nyaa-nuvio/bench.js` at commit `755b7c5`, over the 42-case corpus (19 positives, 23 negatives):
+`node nyaa-nuvio/bench.js` at commit `8e19183`, over the 52-case corpus (20 positives, 32 negatives):
 
 | TP | FP | FN | TN | Precision | Recall | F1 |
 |---|---|---|---|---|---|---|
-| 10 | 2 | 9 | 21 | 0.833 | 0.526 | 0.645 |
+| 10 | 7 | 10 | 25 | 0.588 | 0.500 | 0.541 |
+
+The corpus was extended twice. The first 20 cases were mirrored from `test.js` and the existing matcher passed all of them, so they could only detect regression. Cases 21-42 came from probing 32 realistic Nyaa release names. Cases 43-52 came from a code-quality review that noticed the first batch of "token collision" guards could not fail, because `cleanTorrentTitle` deletes the very tokens they existed to guard — the numbers below are the ones that matter.
 
 False negatives — real Nyaa releases the matcher fails to return:
 
-| id | Pattern | Release |
-|---|---|---|
-| 21 | 4-digit absolute, parenthesised | `[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv` |
-| 22 | 4-digit absolute, bare | `[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]` |
-| 23 | `v2` revision suffix | `[SubsPlease] Show - 09v2 (1080p)` |
-| 24 | `v2` revision suffix | `[Doki] Show - 08v2 (1080p) [HEVC-10bit]` |
-| 25 | `v2` revision suffix | `[Anime Time] Show - 12v2 (1080p)` |
-| 26 | `v3` revision suffix | `[Anime Time] Show - 12v3 (1080p)` |
-| 27 | 4-digit absolute | `[SubsPlease] One Piece - 1150 (1080p) [A1B2C3D4].mkv` |
-| 28 | spelled `Season N` | `[Judas] Show (Season 2) - 13 [1080p]` |
-| 29 | spaced `S2 - E08` | `[EngSub] Show S2 - E08 (1080p)` |
+| id | Request | Pattern | Release |
+|---|---|---|---|
+| 21 | S1E1122 | 4-digit absolute, parenthesised | `[Anime Time] One Piece - 1122 (1080p) [ABCD1234].mkv` |
+| 22 | S1E1123 | 4-digit absolute, bare | `[Animechap] One Piece - 1123 [1080p][HEVC AAC][x265]` |
+| 23 | S1E9 | `v2` revision suffix | `[SubsPlease] Show - 09v2 (1080p)` |
+| 24 | S1E8 | `v2` revision suffix | `[Doki] Show - 08v2 (1080p) [HEVC-10bit]` |
+| 25 | S1E12 | `v2` revision suffix | `[Anime Time] Show - 12v2 (1080p)` |
+| 26 | S1E12 | `v3` revision suffix | `[Anime Time] Show - 12v3 (1080p)` |
+| 27 | S1E1150 | 4-digit absolute | `[SubsPlease] One Piece - 1150 (1080p) [A1B2C3D4].mkv` |
+| 28 | S2E13 | spelled `Season N` | `[Judas] Show (Season 2) - 13 [1080p]` |
+| 29 | S2E8 | spaced `S2 - E08` | `[EngSub] Show S2 - E08 (1080p)` |
+| 48 | S1E1122 | 4-digit absolute, bracketed | `[Anime Time] Show - [1122] [ABCD1234].mkv` |
 
-False positives — worse than the misses, because each returns a real file for the wrong episode:
+False positives — strictly worse than the misses, because each returns a real file for the wrong episode, and the addon cannot tell the user it guessed:
 
-| id | Request | Why it wrongly matches |
-|---|---|---|
-| 38 | S1E13 | `cleanTorrentTitle` strips `(Season 2)`, so no season is detected and the dash branch treats `- 13` as a season-1 absolute. A Season 2 release satisfies a Season 1 request. |
-| 40 | S1E8 | The bare `E(\d+)` handler matches the `E08` in `S2 - E08` and reports it season-less; the guard only checks the *request's* season, never the *title's*. |
+| id | Request | Release | Why it wrongly matches |
+|---|---|---|---|
+| 38 | S1E13 | `[Judas] Show (Season 2) - 13` | `cleanTorrentTitle` strips `(Season 2)`, so no season is detected and the dash branch reads `- 13` as a season-1 absolute. A Season 2 release satisfies a Season 1 request. |
+| 40 | S1E8 | `[EngSub] Show S2 - E08` | The bare `E(\d+)` handler matches the `E08` and reports it season-less; the guard checks the *request's* season, never the *title's*. |
+| 43 | S1E2024 | `[Group] Show [2024] [1080p] [x265].mkv` | The trailing-number branch reads a bare year as an absolute episode number. |
+| 44 | S1E2024 | `[Group] Show [2024][1080p][HEVC]` | Same, with the brackets glued to the resolution tag. |
+| 45 | S1E1080 | `[Group] Show [1080] [HEVC]` | `cleanTorrentTitle` strips `1080p` but not `1080`, so the resolution survives as a bare number and is read as an episode. |
+| 46 | S1E2160 | `[Group] Show [2160] [HEVC]` | Same, 4K. |
+| 47 | S1E720 | `[Group] Show [720] [HEVC]` | Same, 720p. |
 
-Both false positives share a root cause with a false negative — `38` with `28`, `40` with `29` — so the same fix clears each pair. The corpus went from "20 cases that all passed" to "42 cases the existing matcher fails 11 of".
+Root causes group into four pairs, and each fix clears a miss and a false positive together:
+
+- 38 with 28 — season is read after the parentheses that carry it have been stripped.
+- 40 with 29 — the season-less guard honours the request's season but ignores the title's.
+- 43, 44, 46, 47 with 21, 22, 27, 48 — the dash branch and the trailing-number branch are both 1-4 digit-tolerant where they should be year- and resolution-aware.
+- 45 with 21, 22, 27, 48 — `cleanTorrentTitle`'s resolution list is `4K|2160p|1080p|720p|480p|360p`, so a bare `1080` with no `p` is never removed.
+
+The corpus went from "20 cases that all passed" to "52 cases the existing matcher fails 17 of". That is the honest starting point, and it is why Task 2 must be treated as a correctness task rather than a pattern-tweak.
 
 ### A.2 Matcher, after hardening
 
