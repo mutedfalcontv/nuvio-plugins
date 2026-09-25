@@ -261,6 +261,32 @@ function runOffline() {
   // collapsed gap, so the 4-line shape would not hold for untagged releases.
   assert("formatStreamName never emits an empty line", noTags.split("\n").every(function (l) { return l !== ""; }));
 
+  // Line 3 is pinned by code point, not by substring. The spec calls for a
+  // floppy disk before the size and an optical disc before the provider; the
+  // three glyphs that are easy to confuse are U+1F4BE / U+1F4BF / U+1F4A9, and
+  // substituting any of them left the whole suite green.
+  assert("formatStreamName line 3 is exactly the spec's seeders/size/provider line",
+    nameLines[2] === "75 \uD83D\uDCBE 900.0 MiB \uD83D\uDCBF Nyaa");
+  assert("formatStreamName tags join with ' / '",
+    ctx.formatStreamName({ title: "X", seeders: 1, sizeLabel: "1 MiB" }, "720p",
+      ["Multi Subs", "Dual Audio"]).split("\n")[3] === "Multi Subs / Dual Audio");
+  assert("formatStreamName falls back to '?' for a missing sizeLabel",
+    ctx.formatStreamName({ title: "X", seeders: 2 }, "720p", []).split("\n")[2] === "2 \uD83D\uDCBE ? \uD83D\uDCBF Nyaa");
+  assert("formatStreamName shows 0 seeders rather than blanking the line",
+    ctx.formatStreamName({ title: "X", seeders: 0, sizeLabel: "1 MiB" }, "720p", []).split("\n")[2] === "0 \uD83D\uDCBE 1 MiB \uD83D\uDCBF Nyaa");
+
+  // The spec's vocabulary is exactly Torrentio's four words. "Unsubs" was
+  // invented here and false-positives on release names like "H264-Raw".
+  assert("detectAudioTags has no tag outside the spec vocabulary",
+    ctx.detectAudioTags("Show.S01E08.1080p.WEB-DL.H264-Raw").length === 0);
+  assert("detectAudioTags still finds a dub via the loose bare-dub match",
+    ctx.detectAudioTags("Show 08 1080p Dub").indexOf("Dubbed") !== -1);
+
+  // detectAudioTags(null) must not rely on RegExp coercion: test(null) matches
+  // the string "null", so removing the guard left this assertion green.
+  assert("detectAudioTags rejects a missing title without scanning it",
+    ctx.detectAudioTags(null).length === 0 && ctx.detectAudioTags(undefined).length === 0);
+
   // ---- integration (mocked fetch): SubsPlease + English both returned ----
   return ctx.getStreams("122991", "tv", 1, 8).then(function (res) {
     console.log("  integration results:", res.length);
@@ -274,9 +300,15 @@ function runOffline() {
     assert("integration result uses the 4-line label", labelled.name.split("\n").length === 4);
     assert("integration result keeps title raw for the app to key off",
       res.every(function (r) { return r.title === r.name.split("\n")[1]; }));
-    assert("integration result still carries machine-readable fields",
+    // Spec line 101 pins all eight machine-readable fields. Dropping url,
+    // seeders, size or quality from the result object must fail here.
+    assert("integration result still carries every machine-readable field",
       res.every(function (r) {
-        return r.provider === "Nyaa" && r.type === "tv" && r.infoHash === r.infoHash.toLowerCase();
+        return r.provider === "Nyaa" && r.type === "tv" &&
+          r.infoHash === r.infoHash.toLowerCase() && /^[0-9a-f]{32,}$/.test(r.infoHash) &&
+          typeof r.url === "string" && r.url.indexOf("magnet:?xt=urn:btih:") === 0 &&
+          typeof r.seeders === "number" && typeof r.size === "number" && r.size > 0 &&
+          typeof r.quality === "string" && r.quality.length > 0;
       }));
   });
 }

@@ -787,8 +787,7 @@ var LANGUAGE_TAGS = [
   { re: /\bmulti[\s-]?subs?\b|\bmultiple[\s-]?sub(?:title)?s?\b/i, label: "Multi Subs" },
   { re: /\bmulti[\s-]?audio\b/i, label: "Multi Audio" },
   { re: /\bdual[\s-]?audio\b/i, label: "Dual Audio" },
-  { re: /\beng(?:lish)?[\s-]?dub\b|\bdubbed\b|\bdub\b/i, label: "Dubbed" },
-  { re: /\braw\b|\bunsubbed\b/i, label: "Unsubs" }
+  { re: /\beng(?:lish)?[\s-]?dub\b|\bdubbed\b|\bdub\b/i, label: "Dubbed" }
 ];
 
 // Title-scanning, the way Torrentio's addon/lib/subtitles.js does it: the tag
@@ -810,11 +809,15 @@ function detectAudioTags(title) {
 //   <resolution> / <title> / <seeders> <size> <provider> / <tags>
 // A blank field is a single space, never "": Stremio collapses an empty line,
 // so "" would break the 4-line shape for untagged releases.
+// The glyphs are U+1F4BE (floppy) before the size and U+1F4BF (optical disc)
+// before the provider, matching Torrentio's streamInfo. Written as surrogate
+// pairs because \u{...} is ES6 and this file is loaded by a Hermes host; the
+// three confusable code points are U+1F4BE, U+1F4BF and U+1F4A9.
 function formatStreamName(item, quality, tags) {
   return [
     quality || " ",
     item.title || " ",
-    (item.seeders || 0) + " \uD83D\uDCA9 " + (item.sizeLabel || "?") + " \uD83D\uDCBF Nyaa",
+    (item.seeders || 0) + " \uD83D\uDCBE " + (item.sizeLabel || "?") + " \uD83D\uDCBF Nyaa",
     (tags && tags.length) ? tags.join(" / ") : " "
   ].join("\n");
 }
