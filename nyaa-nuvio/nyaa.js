@@ -1,4 +1,7 @@
-var TRACKERS = [
+// Legacy generic swarms, kept as a fallback for a short or failed live list.
+// mergeTrackers orders them last, so once the live list fills its 21 slots these
+// receive none and are absent from every production magnet. See spec 3.2.
+var TRACKERS_GENERIC = [
   "udp://tracker.opentrackr.org:1337/announce",
   "udp://tracker.coppersurfer.tk:6969/announce",
   "udp://tracker.leechers-paradise.org:6969/announce",
@@ -26,37 +29,42 @@ var TRACKERS_ANIME = [
 var MAX_TRACKERS = 25;
 
 // Order: anime set first, then live best trackers, then the legacy generic set.
-// Anime goes first deliberately — if the best-tracker list went first it could
+// Anime goes first deliberately - if the best-tracker list went first it could
 // consume all MAX_TRACKERS slots alone and silently drop the anime trackers,
-// which are the whole point for this plugin. Eviction happens from the tail
-// only, so the anime block is unconditional: it is pushed before the cap is
-// consulted, and the two lists that follow are both bounded by the room left
-// over. Push order is therefore the eviction order, and the cap can only ever
-// take entries from the end.
+// which are the whole point of this plugin for anime.
 function mergeTrackers(best) {
-  var out = [];
+  // The anime set is the head. It is seeded here and never passed to take(),
+  // never filtered and never sliced, so no input size can remove it: the
+  // guarantee is structural, not a consequence of push order.
   // Null-prototype so a live entry literally named "constructor" or "toString"
   // is tracked as itself rather than being mistaken for an inherited member and
   // silently dropped.
   var seen = Object.create(null);
-  function push(t) {
-    if (t && !seen[t]) { seen[t] = true; out.push(t); }
+  var head = [];
+  for (var a = 0; a < TRACKERS_ANIME.length; a++) {
+    seen[TRACKERS_ANIME[a]] = true;
+    head.push(TRACKERS_ANIME[a]);
   }
 
-  for (var a = 0; a < TRACKERS_ANIME.length; a++) push(TRACKERS_ANIME[a]);
+  // Everything after the head shares one budget, counted in accepted entries so
+  // a duplicate or junk line cannot consume a slot. Room is read once, so the
+  // live list either fits or takes every remaining slot: with the real
+  // trackers_best.txt that is the common case, and the legacy generic set then
+  // receives zero slots. It is a fallback for a short or failed live list.
+  // See spec 3.2.
+  var room = MAX_TRACKERS - head.length;
+  var tail = [];
+  function take(list) {
+    for (var k = 0; k < list.length && tail.length < room; k++) {
+      var t = list[k];
+      if (t && !seen[t]) { seen[t] = true; tail.push(t); }
+    }
+  }
+  take(best || []);
+  take(TRACKERS_GENERIC);
 
-  // Room is computed once, so the live list cannot crowd the generic set out
-  // gradually - it either fits or takes every remaining slot. With the real
-  // trackers_best.txt that is the common case, not the exception: the generic
-  // set is a fallback for a short or failed live list, and in practice receives
-  // zero slots. See spec 3.2.
-  var bestList = best || [];
-  var room = MAX_TRACKERS - out.length;
-  for (var b = 0; b < bestList.length && b < room; b++) push(bestList[b]);
-
-  for (var g = 0; g < TRACKERS.length && out.length < MAX_TRACKERS; g++) push(TRACKERS[g]);
-
-  return out;
+  // The load-bearing line: nothing downstream can reach the head.
+  return head.concat(tail);
 }
 
 var bestTrackersCache = null;
@@ -64,6 +72,9 @@ var bestTrackersCache = null;
 // Returns the live best-tracker list if it has been fetched, otherwise an empty
 // list. Populated by initBestTrackers(); the stub keeps buildMagnet correct
 // before that fetch lands.
+// Must return an array of announce-URL strings - mergeTrackers does not
+// validate its input. The cache is returned by reference, so a later in-place
+// trim of it would be visible to every subsequent buildMagnet.
 function getBestTrackers() {
   return bestTrackersCache || [];
 }

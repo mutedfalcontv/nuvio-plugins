@@ -151,20 +151,26 @@ function runOffline() {
   assert("guard: raw bracket chain honours the title's season",
     ctx.matchEpisode("[Group] Show S2 [08][WebRip][HEVC_AAC]", 1, 8, null) === false);
 
-  // ---- Part A1: anime tracker set, MAX_TRACKERS cap, tail-only eviction ----
+  // ---- Part A1: anime tracker set and MAX_TRACKERS cap ----
+  // The anime trackers must survive any amount of cap pressure from the live
+  // list, so each one is asserted individually by assertAllAnime.
   const ANIME = [
     "http://nyaa.tracker.wf:7777/announce",
     "http://anidex.moe:6969/announce",
     "http://tracker.anirena.com:80/announce",
     "udp://tracker.uw0.xyz:6969/announce"
   ];
-  function hasAllAnime(list) {
-    for (var ai = 0; ai < ANIME.length; ai++) if (list.indexOf(ANIME[ai]) === -1) return false;
-    return true;
+  // Names the tracker that vanished in the failure line - which of the four is
+  // missing is the only thing a reader needs when this fails.
+  function assertAllAnime(name, list) {
+    for (var ai = 0; ai < ANIME.length; ai++) {
+      if (list.indexOf(ANIME[ai]) === -1) return assert(name + " [" + ANIME[ai] + " missing]", false);
+    }
+    return assert(name, true);
   }
 
   const merged = ctx.mergeTrackers([]);
-  assert("mergeTrackers includes all 4 anime trackers", hasAllAnime(merged));
+  assertAllAnime("mergeTrackers includes all 4 anime trackers", merged);
   assert("mergeTrackers keeps legacy generic trackers", merged.indexOf("udp://tracker.opentrackr.org:1337/announce") !== -1);
   assert("mergeTrackers default length is 14", merged.length === 14);
   assert("mergeTrackers anime block leads the list",
@@ -173,23 +179,37 @@ function runOffline() {
   // Live list under the cap: it slots in after the anime block, generic fills the rest.
   const twoBest = ["udp://tracker.one.example:6969/announce", "udp://tracker.two.example:451/announce"];
   const underCap = ctx.mergeTrackers(twoBest);
-  assert("mergeTrackers live entries follow the anime block",
-    underCap[0] === ANIME[0] && underCap[4] === twoBest[0] && underCap.length === 16);
+  assert("mergeTrackers keeps the anime head in place under a short live list", underCap[0] === ANIME[0]);
+  assert("mergeTrackers live entries follow the anime block", underCap[4] === twoBest[0]);
+  assert("mergeTrackers total is 14 + 2 live", underCap.length === 16);
 
-  // Over the cap: eviction must come off the tail, never off the anime set.
+  // Over the cap: the anime set must survive, and the tail is what gets cut.
   const many = [];
   for (let mi = 0; mi < 40; mi++) many.push("udp://best" + mi + ".example:6969/announce");
   const capped = ctx.mergeTrackers(many);
   assert("mergeTrackers caps at 25", capped.length === 25);
-  assert("mergeTrackers never evicts anime trackers under cap pressure", hasAllAnime(capped));
-  assert("mergeTrackers anime block comes first", capped[0] === "http://nyaa.tracker.wf:7777/announce");
-  assert("mergeTrackers evicts the generic tail, not the anime set",
+  assertAllAnime("mergeTrackers never evicts anime trackers under cap pressure", capped);
+  assert("mergeTrackers anime block comes first", capped[0] === ANIME[0]);
+  assert("mergeTrackers cuts the generic tail, not the anime set",
     capped.indexOf("udp://tracker.opentrackr.org:1337/announce") === -1);
 
   // A live list that repeats an anime tracker must not cost a slot or an entry.
   const dupes = ctx.mergeTrackers(ANIME.concat(ANIME).concat(["udp://best.example:6969/announce"]));
-  assert("mergeTrackers dedupes live anime repeats",
-    dupes.length === 15 && hasAllAnime(dupes) && dupes[4] === "udp://best.example:6969/announce");
+  assert("mergeTrackers dedupes live anime repeats", dupes.length === 15);
+  assertAllAnime("mergeTrackers dedupes live anime repeats", dupes);
+  assert("mergeTrackers live entries follow the anime block after dedup",
+    dupes[4] === "udp://best.example:6969/announce");
+
+  // The live budget is counted in accepted entries, not loop iterations, so a
+  // rejected line inside the first 21 must cost the generic tail a slot rather
+  // than a live one. Every earlier cap test uses a fully distinct live list,
+  // where the two bound semantics are provably identical and the difference is
+  // invisible - this is the case that tells them apart. Room is 21 (25 - 4).
+  const wasted = [ANIME[0]];
+  for (let wi = 0; wi < 30; wi++) wasted.push("udp://w" + wi + ".example:6969/announce");
+  const tight = ctx.mergeTrackers(wasted);
+  assert("mergeTrackers spends rejected live slots on the generic tail, not the live list",
+    tight.filter(function (t) { return t.indexOf("udp://w") === 0; }).length === 21);
 
   const magnet = ctx.buildMagnet("AAA11111111111111111111111111111111111111", "Some Title");
   assert("buildMagnet keeps the announce prefix and hash verbatim",
@@ -198,7 +218,7 @@ function runOffline() {
   // encodeURIComponent here leaves every other assertion green.
   assert("buildMagnet percent-encodes the display name",
     magnet.indexOf("&dn=Some%20Title&tr=") !== -1);
-  assert("buildMagnet embeds anime tracker", magnet.indexOf(encodeURIComponent("http://nyaa.tracker.wf:7777/announce")) !== -1);
+  assert("buildMagnet embeds anime tracker", magnet.indexOf(encodeURIComponent(ANIME[0])) !== -1);
   const trCount = magnet.split("&tr=").length - 1;
   // Static-only build: 4 anime + 10 generic, exactly. Not a range - a loose
   // bound would survive losing a generic tracker.
