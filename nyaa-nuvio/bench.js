@@ -80,7 +80,7 @@ if (thrown.length) {
 }
 
 // Throws gate as hard as a miss. matchEpisode is called inside getStreams' single
-// try block (nyaa.js:214, catch at :247 returns []), so a throw discards every
+// try block (nyaa.js:185, catch at :279 returns []), so a throw discards every
 // stream accumulated for the whole query loop - the search silently returns
 // nothing. A matcher that crashes on an unrecognised title shape must not be
 // able to pass a gate that only counts true/false.

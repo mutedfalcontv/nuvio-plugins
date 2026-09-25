@@ -599,9 +599,11 @@ function matchEpisode(title, requestedSeason, requestedEpisode, absoluteNumber) 
     // reject it as a revision rather than blanket-refusing 265 outright - "One
     // Piece - 265" is a real episode.
     var dashIsRevision = !!dashMatch[2] && dashEp >= 100;
-    // Rejecting the candidate (rather than returning false) lets the batch
-    // handler below still see a year-shaped title such as
-    // "Show - 2024 [1080p] [BATCH]".
+    // Skip the candidate rather than returning false, so a title the dash pattern
+    // cannot speak for still reaches the branches below. Note that a genuine batch
+    // is already gone by this point - nyaa.js:536 returns false for anything
+    // BATCH_PATTERN matches - so this fall-through is about the episode branches,
+    // not about rescuing batches.
     if (!dashIsRevision && !looksLikeMetadata(dashEp)) {
       // Any season marker ("S2", "Season 2", "(Season 2)", "S02") makes the dash
       // number SEASON-RELATIVE - e.g. "Solo Leveling Season 2 - 08" is S2E8, so it

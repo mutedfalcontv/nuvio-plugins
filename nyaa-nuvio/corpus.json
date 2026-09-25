@@ -61,7 +61,9 @@
 
     { "id": "53-neg-rawchain-titled-season", "title": "[Group] Show S2 [08][WebRip][HEVC_AAC]", "season": 1, "episode": 8, "absolute": null, "expect": false },
     { "id": "54-trailing-number-positive", "title": "[Group] Show 08 [1080p]", "season": 1, "episode": 8, "absolute": null, "expect": true },
-    { "id": "55-neg-episodes-count-token", "title": "[Group] Show (12 Episodes) [1080p]", "season": 1, "episode": 12, "absolute": null, "expect": false }
+    { "id": "55-neg-episodes-count-token", "title": "[Group] Show (12 Episodes) [1080p]", "season": 1, "episode": 12, "absolute": null, "expect": false },
+    { "id": "56-neg-dash-branch-year", "title": "[Group] Show - 2024 (1080p)", "season": 1, "episode": 2024, "absolute": null, "expect": false },
+    { "id": "57-neg-dash-branch-resolution", "title": "[Group] Show - 2160 (1080p)", "season": 1, "episode": 2160, "absolute": null, "expect": false }
   ],
   "knownLimitations": [
     "[Group] Show [09v2] [1080p] does not match S1E9. EPISODE_PATTERNS contains \\[(\\d+)v\\d\\] , but cleanTorrentTitle strips every bracket before the loop runs, so the pattern is dead code. Pre-existing, unchanged by Task 2, and not asserted here because asserting it would fail the gate. The dash form '- 09v2' does match (cases 23-26)."
