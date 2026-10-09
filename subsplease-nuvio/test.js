@@ -96,6 +96,11 @@ const WRONG3_PAGE =
   '<html><head><title>' + WRONG3_SHOW + ' downloads - SubsPlease</title></head>' +
   '<body><table id="show-release-table" sid="998"></table></body></html>';
 
+// The "f=latest" feed (recently airing shows). The search endpoint is sometimes
+// empty for every term, so the plugin falls back to this feed for a page slug.
+const YURU_SLUG = "yuru-camp";
+const YURU_SHOW = "Yuru Camp";
+
 function aniMedia(id, episodes, sequelId, sequelEpisodes) {
   var edges = [];
   if (sequelId) {
@@ -174,6 +179,12 @@ function fakeFetch(url, opts) {
   }
   // SubsPlease show API for sid 999 -> Seiin episode 02.
   if (url.indexOf("subsplease.org/api/") !== -1) {
+    // Latest feed (same shape as search): the empty-search fallback source.
+    if (url.indexOf("f=latest") !== -1) {
+      var latestBody = {};
+      latestBody[YURU_SHOW + " - 05"] = { show: YURU_SHOW, episode: "05", page: YURU_SLUG };
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(latestBody), text: () => Promise.resolve("") });
+    }
     // Search API -> canonical slug, keyed "<Show> - <ep>".
     if (url.indexOf("f=search") !== -1) {
       if (url.indexOf("Kusuriya") !== -1) {
@@ -264,6 +275,8 @@ async function main() {
   assert("resolveSlugViaSearch filters unrelated substring hits", searchFiltered.length === 0);
   const searchMiss = await ctx.resolveSlugViaSearch(["Nonexistent English Title"]);
   assert("resolveSlugViaSearch returns [] on English miss", searchMiss.length === 0);
+  const latestFallback = await ctx.resolveSlugViaSearch(["Yuru Camp"]);
+  assert("resolveSlugViaSearch falls back to the latest feed", latestFallback.indexOf(YURU_SLUG) !== -1);
 
   // ---- integration: S2E2 must not return the "-2" wrong show ----
   const streams = await ctx.getStreams("71499", "tv", 2, 2);

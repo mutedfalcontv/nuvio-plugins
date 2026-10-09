@@ -670,6 +670,28 @@ function nameMatchesShow(showName, titles) {
   return false;
 }
 
+var SP_API_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+  "X-Requested-With": "XMLHttpRequest"
+};
+
+// Pull canonical "page" slugs out of a SubsPlease index object (the search and
+// latest feeds share the same shape: keyed "<Show> - <ep>", each value carries
+// a "page" field). Empty bodies parse to nothing, so non-objects yield [].
+function collectSlugMatches(data, titles) {
+  var out = [];
+  if (!data || typeof data !== "object" || Array.isArray(data)) return out;
+  for (var key in data) {
+    var item = data[key];
+    if (!item || !item.page) continue;
+    var slug = String(item.page).trim();
+    if (!isUsableSlug(slug)) continue;
+    if (!nameMatchesShow(item.show || key, titles)) continue;
+    if (out.indexOf(slug) === -1) out.push(slug);
+  }
+  return out;
+}
+
 // Resolve canonical SubsPlease slugs from the search API. The endpoint returns
 // recent uploads keyed "<Show> - <ep>"; each value carries the canonical "page"
 // slug (e.g. "kusuriya-no-hitorigoto"). This maps titles that generateSlugs
@@ -685,32 +707,33 @@ async function resolveSlugViaSearch(titles) {
     var data = null;
     try {
       var url = "https://subsplease.org/api/?f=search&tz=UTC&s=" + encodeURIComponent(query);
-      var resp = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "X-Requested-With": "XMLHttpRequest"
-        }
-      });
+      var resp = await fetch(url, { headers: SP_API_HEADERS });
       data = await resp.json();
     } catch (e) {
       console.error("SP: search failed for", query, e.message);
       continue;
     }
-    // Empty array (or non-object) means no match for this title.
-    if (!data || typeof data !== "object" || Array.isArray(data)) continue;
-    var matched = [];
-    for (var key in data) {
-      var item = data[key];
-      if (!item || !item.page) continue;
-      var slug = String(item.page).trim();
-      if (!isUsableSlug(slug)) continue;
-      if (!nameMatchesShow(item.show || key, [query])) continue;
-      if (matched.indexOf(slug) === -1) matched.push(slug);
-    }
+    var matched = collectSlugMatches(data, [query]);
     for (var mi = 0; mi < matched.length; mi++) {
       if (found.indexOf(matched[mi]) === -1) found.push(matched[mi]);
     }
     if (found.length > 0) break;
+  }
+  // The search endpoint can answer with an empty body for every term (observed
+  // live). The "latest" feed still lists recently airing shows together with
+  // their canonical page slugs, so try it once before giving up.
+  if (found.length === 0) {
+    try {
+      var latestResp = await fetch("https://subsplease.org/api/?f=latest&tz=UTC", { headers: SP_API_HEADERS });
+      var latest = await latestResp.json();
+      var latestMatched = collectSlugMatches(latest, titles);
+      for (var li = 0; li < latestMatched.length; li++) {
+        if (found.indexOf(latestMatched[li]) === -1) found.push(latestMatched[li]);
+      }
+      if (found.length > 0) console.error("SP: latest slug fallback", found.join(", "));
+    } catch (e) {
+      console.error("SP: latest fallback failed", e.message);
+    }
   }
   return found;
 }
