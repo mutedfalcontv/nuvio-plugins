@@ -24,7 +24,37 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     console.error("SP: targetEp", targetEp);
     if (!titles || titles.length === 0) { console.error("SP: no titles"); return []; }
 
+    var rawEp = parseInt(episode, 10);
+
+    // Candidate absolute episodes to try, in priority order. Anime seasons are
+    // often split differently by the app's metadata source (e.g. AniList
+    // 24/24/12) than by TMDB (one long season), so the TMDB-derived absolute
+    // episode can be wrong. Prefer the AniList-derived absolute episode for
+    // anime, then fall back to the TMDB/Kitsu-derived one, then the raw
+    // episode; the first candidate that yields a release wins. Trying the
+    // AniList value first avoids a redundant re-fetch of the matching slug
+    // when the TMDB value is wrong.
+    var epCandidates = [];
+    function addEpCandidate(v) {
+      if (v === null || v === undefined || isNaN(v)) return;
+      if (epCandidates.indexOf(v) === -1) epCandidates.push(v);
+    }
+    if (!isKitsu) {
+      var aniAbs = await getAniListAbsoluteEp(titles, season, episode);
+      if (aniAbs !== null) console.error("SP: anilist absolute ep", aniAbs);
+      addEpCandidate(aniAbs);
+    }
+    addEpCandidate(targetEp);
+    addEpCandidate(rawEp);
+
+    // Canonical slugs from the SubsPlease search API come first: they survive
+    // title differences (romanization, punctuation) that generateSlugs can miss.
     var slugs = [];
+    var searchSlugs = await resolveSlugViaSearch(titles);
+    if (searchSlugs.length > 0) console.error("SP: search slugs", searchSlugs.join(", "));
+    for (var qi = 0; qi < searchSlugs.length; qi++) {
+      if (slugs.indexOf(searchSlugs[qi]) === -1) slugs.push(searchSlugs[qi]);
+    }
     for (var ti = 0; ti < titles.length; ti++) {
       var tSlugs = generateSlugs(titles[ti]);
       for (var si = 0; si < tSlugs.length; si++) {
@@ -32,12 +62,12 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
     console.error("SP: slugs", slugs.join(", "));
+    console.error("SP: ep candidates", epCandidates.join(", "));
 
-    var rawEp = parseInt(episode, 10);
-    var mainEp = targetEp !== null ? targetEp : rawEp;
-
-    if (mainEp !== null && !isNaN(mainEp)) {
+    for (var ei = 0; ei < epCandidates.length; ei++) {
+      var mainEp = epCandidates[ei];
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         console.error("SP: try slug", slugs[si], "targetEp=" + mainEp);
         var pageResults = await scrapeShowPage(slugs[si], mainEp);
         console.error("SP: slug result", pageResults.length);
@@ -49,30 +79,20 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (seasonNum > 1 && slugs.length > 0) {
       console.error("SP: trying season pages for S" + seasonNum);
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         var sSlug = slugs[si] + "-s" + seasonNum;
         console.error("SP: try season slug", sSlug);
-        var sResults = await scrapeSeasonPage(sSlug, episode);
-        console.error("SP: season slug result", sResults.length);
+        var sResults = await scrapeSeasonPage(sSlug, episode, titles);
+        console.error("SP: sSlug result", sResults.length);
         if (sResults.length > 0) return sResults;
       }
-      // Try without 's' prefix (handles rare -{N} pattern like bukiyou-na-senpai-2)
-      console.error("SP: trying bare-number season pages for S" + seasonNum);
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         var nSlug = slugs[si] + "-" + seasonNum;
         console.error("SP: try bare season slug", nSlug);
-        var nResults = await scrapeSeasonPage(nSlug, episode);
+        var nResults = await scrapeSeasonPage(nSlug, episode, titles);
         console.error("SP: bare season slug result", nResults.length);
         if (nResults.length > 0) return nResults;
-      }
-    }
-
-    if (!isNaN(rawEp) && (targetEp === null || rawEp !== targetEp)) {
-      console.error("SP: trying main pages with raw ep", rawEp);
-      for (var si = 0; si < slugs.length; si++) {
-        console.error("SP: try slug raw", slugs[si], rawEp);
-        var rawResults = await scrapeShowPage(slugs[si], rawEp);
-        console.error("SP: raw slug result", rawResults.length);
-        if (rawResults.length > 0) return rawResults;
       }
     }
 
@@ -97,15 +117,24 @@ async function getTmdbTitles(tmdbId, mediaType) {
 
     var origName = data.original_name || data.original_title;
     if (origName && titles.indexOf(origName) === -1) {
+      titles.push(origName);
+    }
+
+    if (origName) {
       var isAscii = true;
       for (var ci = 0; ci < origName.length; ci++) {
         if (origName.charCodeAt(ci) > 127) { isAscii = false; break; }
       }
-      if (isAscii) {
-        titles.push(origName);
-      } else {
+      if (!isAscii) {
         var romaji = await getRomajiTitle(tmdbId, mediaType);
-        if (romaji && titles.indexOf(romaji) === -1) titles.push(romaji);
+        if (romaji && titles.indexOf(romaji) === -1) {
+          titles.push(romaji);
+        } else {
+          var aniRomaji = await searchAniListTitle(data.name || data.title);
+          if (aniRomaji && titles.indexOf(aniRomaji) === -1) {
+            titles.push(aniRomaji);
+          }
+        }
       }
     }
   } catch (e) {
@@ -158,6 +187,41 @@ async function getKitsuTitles(tmdbId) {
     console.error("Kitsu fetch failed:", e.message);
   }
   return titles;
+}
+
+async function searchAniListTitle(englishTitle) {
+  if (!englishTitle) return null;
+  try {
+    var query = `
+      query ($search: String) {
+        Media(search: $search, type: ANIME) {
+          title { romaji english }
+        }
+      }`;
+    var variables = { search: englishTitle };
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: variables })
+    });
+    if (resp.status === 429) {
+      console.error("AniList rate limited, skipping romaji search");
+      return null;
+    }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media || !data.data.Media.title) return null;
+    var title = data.data.Media.title;
+    if (title.romaji && title.romaji !== englishTitle) return title.romaji;
+    if (title.english && title.english !== englishTitle) return title.english;
+    return null;
+  } catch (e) {
+    console.error("AniList title search failed:", e.message);
+    return null;
+  }
 }
 
 async function getKitsuAbsoluteEp(kitsuId, season, episode) {
@@ -238,7 +302,117 @@ async function getTmdbAbsoluteEp(tmdbId, season, episode) {
   }
 }
 
+// Resolve an absolute (cross-season) episode number from the AniList sequel
+// chain. Anime is frequently split into per-season AniList entries (e.g.
+// Kusuriya no Hitorigoto = 24 / 24 / 12), so the absolute episode for season S
+// is (sum of episodes of the TV entries before S) + episode. This matches the
+// way SubsPlease numbers releases continuously across a franchise.
+async function getAniListAbsoluteEp(titles, season, episode) {
+  try {
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    if (isNaN(seasonNum) || isNaN(epNum)) { console.error("AniListAbs: bad params"); return null; }
+    if (seasonNum < 1) { console.error("AniListAbs: season < 1"); return null; }
+    if (!titles || titles.length === 0) { console.error("AniListAbs: no titles"); return null; }
+
+    var node = null;
+    for (var i = 0; i < titles.length && !node; i++) {
+      node = await aniListMediaSearch(titles[i]);
+    }
+    if (!node) { console.error("AniListAbs: no base media"); return null; }
+    console.error("AniListAbs: base", node.id, node.episodes, node.format);
+
+    var offset = 0;
+    var seen = {};
+    seen[node.id] = true;
+    for (var s = 1; s < seasonNum; s++) {
+      offset += node.episodes || 0;
+      var sequel = findAniListSequel(node);
+      if (!sequel) { console.error("AniListAbs: no TV sequel at step " + s); return null; }
+      if (seen[sequel.id]) { console.error("AniListAbs: sequel cycle"); return null; }
+      seen[sequel.id] = true;
+      if (s === seasonNum - 1) {
+        if (!sequel.episodes) { console.error("AniListAbs: sequel episodes unknown"); return null; }
+        console.error("AniListAbs: offset=" + offset + " abs=" + (offset + epNum) + " (S" + seasonNum + "E" + epNum + ")");
+        return offset + epNum;
+      }
+      node = await aniListMediaById(sequel.id);
+      if (!node) { console.error("AniListAbs: sequel fetch failed"); return null; }
+    }
+
+    console.error("AniListAbs: offset=0 abs=" + epNum + " (S" + seasonNum + "E" + epNum + ")");
+    return epNum;
+  } catch (e) {
+    console.error("AniList absolute ep failed:", e.message);
+    return null;
+  }
+}
+
+function findAniListSequel(node) {
+  if (!node || !node.relations) return null;
+  for (var i = 0; i < node.relations.length; i++) {
+    var edge = node.relations[i];
+    if (edge && edge.relationType === "SEQUEL" && edge.node && edge.node.format === "TV") {
+      return edge.node;
+    }
+  }
+  return null;
+}
+
+function normalizeAniListMedia(media) {
+  if (!media) return null;
+  media.relations = (media.relations && media.relations.edges) ? media.relations.edges : [];
+  return media;
+}
+
+async function aniListMediaSearch(search) {
+  if (!search) return null;
+  try {
+    var query = "query ($search: String) { Media(search: $search, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { search: search } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs search failed:", e.message);
+    return null;
+  }
+}
+
+async function aniListMediaById(id) {
+  if (!id) return null;
+  try {
+    var query = "query ($id: Int) { Media(id: $id, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { id: id } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs fetch failed:", e.message);
+    return null;
+  }
+}
+
 async function scrapeShowPage(slug, targetEp) {
+  if (!isUsableSlug(slug)) return [];
   try {
     var url = "https://subsplease.org/shows/" + slug + "/";
     var resp = await fetch(url, {
@@ -312,7 +486,8 @@ async function scrapeShowPage(slug, targetEp) {
   }
 }
 
-async function scrapeSeasonPage(seasonSlug, episode) {
+async function scrapeSeasonPage(seasonSlug, episode, expectedTitles) {
+  if (!isUsableSlug(seasonSlug)) return [];
   try {
     var url = "https://subsplease.org/shows/" + seasonSlug + "/";
     console.error("SP: fetching season page", url);
@@ -345,6 +520,11 @@ async function scrapeSeasonPage(seasonSlug, episode) {
       var itemEp = parseInt(item.episode, 10);
       if (isNaN(itemEp)) continue;
       if (itemEp !== epNum) continue;
+
+      if (expectedTitles && expectedTitles.length > 0 && !nameMatchesShow(item.show, expectedTitles)) {
+        console.error("SP: season show mismatch, rejecting", item.show);
+        continue;
+      }
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -449,14 +629,113 @@ function generateSlugs(title) {
 
   var deduped = [];
   for (var si = 0; si < slugs.length; si++) {
-    if (deduped.indexOf(slugs[si]) === -1) {
+    if (isUsableSlug(slugs[si]) && deduped.indexOf(slugs[si]) === -1) {
       deduped.push(slugs[si]);
     }
   }
   for (var si = 0; si < extra.length; si++) {
-    deduped.push(extra[si]);
+    if (isUsableSlug(extra[si]) && deduped.indexOf(extra[si]) === -1) {
+      deduped.push(extra[si]);
+    }
   }
   return deduped;
+}
+
+function isUsableSlug(slug) {
+  return typeof slug === "string" && slug.length >= 2 && /[a-z0-9]/.test(slug);
+}
+
+function showNameTokens(name) {
+  return (name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(function(w) {
+    return w.length >= 3;
+  });
+}
+
+function nameMatchesShow(showName, titles) {
+  if (!titles || titles.length === 0) return true;
+  var showNorm = (showName || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!showNorm) return true;
+  var showTokens = showNameTokens(showName);
+  for (var i = 0; i < titles.length; i++) {
+    var tNorm = (titles[i] || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!tNorm) continue;
+    if (tNorm.indexOf(showNorm) !== -1 || showNorm.indexOf(tNorm) !== -1) return true;
+    var tTokens = showNameTokens(titles[i]);
+    for (var a = 0; a < showTokens.length; a++) {
+      for (var b = 0; b < tTokens.length; b++) {
+        if (showTokens[a] === tTokens[b]) return true;
+      }
+    }
+  }
+  return false;
+}
+
+var SP_API_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+  "X-Requested-With": "XMLHttpRequest"
+};
+
+// Pull canonical "page" slugs out of a SubsPlease index object (the search and
+// latest feeds share the same shape: keyed "<Show> - <ep>", each value carries
+// a "page" field). Empty bodies parse to nothing, so non-objects yield [].
+function collectSlugMatches(data, titles) {
+  var out = [];
+  if (!data || typeof data !== "object" || Array.isArray(data)) return out;
+  for (var key in data) {
+    var item = data[key];
+    if (!item || !item.page) continue;
+    var slug = String(item.page).trim();
+    if (!isUsableSlug(slug)) continue;
+    if (!nameMatchesShow(item.show || key, titles)) continue;
+    if (out.indexOf(slug) === -1) out.push(slug);
+  }
+  return out;
+}
+
+// Resolve canonical SubsPlease slugs from the search API. The endpoint returns
+// recent uploads keyed "<Show> - <ep>"; each value carries the canonical "page"
+// slug (e.g. "kusuriya-no-hitorigoto"). This maps titles that generateSlugs
+// cannot reproduce (romanization/spelling differences). It is best-effort:
+// any failure falls back silently to the generated slugs. English-only titles
+// usually miss (the index is romaji), so query every known title until one hits.
+async function resolveSlugViaSearch(titles) {
+  var found = [];
+  if (!titles || titles.length === 0) return found;
+  for (var i = 0; i < titles.length; i++) {
+    var query = titles[i];
+    if (!query) continue;
+    var data = null;
+    try {
+      var url = "https://subsplease.org/api/?f=search&tz=UTC&s=" + encodeURIComponent(query);
+      var resp = await fetch(url, { headers: SP_API_HEADERS });
+      data = await resp.json();
+    } catch (e) {
+      console.error("SP: search failed for", query, e.message);
+      continue;
+    }
+    var matched = collectSlugMatches(data, [query]);
+    for (var mi = 0; mi < matched.length; mi++) {
+      if (found.indexOf(matched[mi]) === -1) found.push(matched[mi]);
+    }
+    if (found.length > 0) break;
+  }
+  // The search endpoint can answer with an empty body for every term (observed
+  // live). The "latest" feed still lists recently airing shows together with
+  // their canonical page slugs, so try it once before giving up.
+  if (found.length === 0) {
+    try {
+      var latestResp = await fetch("https://subsplease.org/api/?f=latest&tz=UTC", { headers: SP_API_HEADERS });
+      var latest = await latestResp.json();
+      var latestMatched = collectSlugMatches(latest, titles);
+      for (var li = 0; li < latestMatched.length; li++) {
+        if (found.indexOf(latestMatched[li]) === -1) found.push(latestMatched[li]);
+      }
+      if (found.length > 0) console.error("SP: latest slug fallback", found.join(", "));
+    } catch (e) {
+      console.error("SP: latest fallback failed", e.message);
+    }
+  }
+  return found;
 }
 
 module.exports = { getStreams };
