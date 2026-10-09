@@ -1,6 +1,6 @@
 {
   "name": "Nuvio Stream Bundle",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "SubsPlease anime + Nyaa.si torrents + Bollyzon Indian TV series",
   "author": "ajinkyajacob",
   "scrapers": [
@@ -18,7 +18,7 @@
       "id": "nyaa",
       "name": "Nyaa",
       "description": "Anime torrents from Nyaa.si",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "filename": "nyaa-nuvio/nyaa.js",
       "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],
