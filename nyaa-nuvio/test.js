@@ -53,6 +53,13 @@ function loadSrc(fakeFetch) {
 const RELEASE_HASH = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
 const RELEASE_TITLE = "[SubsPlease] Kusuriya no Hitorigoto - 50 (1080p) [ABCDEF].mkv";
 
+// A release that matches under the *English* title (season/episode form), as
+// real groups like ToonsHub/AnoZu publish. It must not prevent the romaji
+// SubsPlease release from being found (regression: the plugin used to stop at
+// the first title that produced any match, skipping the romaji title).
+const EN_HASH = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
+const EN_TITLE = "[ToonsHub] The Apothecary Diaries S03E02 1080p CR WEB-DL AAC2.0 H.264";
+
 function aniMedia(id, episodes, sequelId, sequelEpisodes) {
   var edges = [];
   if (sequelId) {
@@ -86,6 +93,22 @@ const RSS =
   '<nyaa:trusted>Yes</nyaa:trusted>' +
   '</item></channel></rss>';
 
+function makeRss(title, hash, seeders) {
+  return '<rss><channel><item>' +
+    '<title>' + title + '</title>' +
+    '<link>https://nyaa.si/view/2</link>' +
+    '<guid>' + hash + '</guid>' +
+    '<nyaa:infoHash>' + hash + '</nyaa:infoHash>' +
+    '<nyaa:seeders>' + seeders + '</nyaa:seeders>' +
+    '<nyaa:leechers>1</nyaa:leechers>' +
+    '<nyaa:size>1.4 GiB</nyaa:size>' +
+    '<nyaa:categoryId>1_2</nyaa:categoryId>' +
+    '<nyaa:trusted>Yes</nyaa:trusted>' +
+    '</item></channel></rss>';
+}
+
+const EN_RSS = makeRss(EN_TITLE, EN_HASH, 5);
+
 function fakeFetch(url, opts) {
   if (url.indexOf("api.themoviedb.org/3/tv/220542/alternative_titles") !== -1) {
     return Promise.resolve({ status: 200, json: () => Promise.resolve({ results: [] }), text: () => Promise.resolve("") });
@@ -117,7 +140,12 @@ function fakeFetch(url, opts) {
     return Promise.resolve({ status: 200, json: () => Promise.resolve({ data: { Media: media } }), text: () => Promise.resolve("") });
   }
   if (url.indexOf("nyaa.si") !== -1) {
-    // Only the romaji title ("Kusuriya no Hitorigoto") finds the release.
+    // The English title finds a non-SubsPlease release...
+    if (url.indexOf("Apothecary") !== -1) {
+      return Promise.resolve({ status: 200, text: () => Promise.resolve(EN_RSS) });
+    }
+    // ...and only the romaji title ("Kusuriya no Hitorigoto") finds the
+    // SubsPlease release.
     if (url.indexOf("Kusuriya") !== -1) {
       return Promise.resolve({ status: 200, text: () => Promise.resolve(RSS) });
     }
@@ -153,6 +181,13 @@ async function main() {
   assert("getStreams('The Apothecary Diaries' S3E2) returns a stream", streams.length > 0);
   assert("getStreams('The Apothecary Diaries' S3E2) returns the ep 50 release",
     streams.length > 0 && streams[0].title.indexOf(" - 50 ") !== -1);
+  // Regression: the English title yields a matching S03E02 release from another
+  // group; the plugin must keep going and also surface the romaji SubsPlease
+  // release rather than stopping at the first title that matched.
+  assert("getStreams surfaces the SubsPlease release alongside other groups",
+    streams.some(function (s) { return /subsplease/i.test(s.title); }));
+  assert("getStreams surfaces the other-group (English-title) release too",
+    streams.some(function (s) { return /ToonsHub/i.test(s.title); }));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed === 0 ? 0 : 1);

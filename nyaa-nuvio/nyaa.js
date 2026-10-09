@@ -107,8 +107,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
         if (results.length > 0) break;
       }
-
-      if (results.length > 0) break;
     }
 
     results.sort(function(a, b) {
