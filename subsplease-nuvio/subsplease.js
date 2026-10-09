@@ -24,6 +24,26 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     console.error("SP: targetEp", targetEp);
     if (!titles || titles.length === 0) { console.error("SP: no titles"); return []; }
 
+    var rawEp = parseInt(episode, 10);
+
+    // Candidate absolute episodes to try, in priority order. Anime seasons are
+    // often split differently by the app's metadata source (e.g. AniList
+    // 24/24/12) than by TMDB (one long season), so the TMDB-derived absolute
+    // episode can be wrong. Add the AniList-derived absolute episode too and
+    // let the first candidate that yields a release win.
+    var epCandidates = [];
+    function addEpCandidate(v) {
+      if (v === null || v === undefined || isNaN(v)) return;
+      if (epCandidates.indexOf(v) === -1) epCandidates.push(v);
+    }
+    addEpCandidate(targetEp);
+    if (!isKitsu) {
+      var aniAbs = await getAniListAbsoluteEp(titles, season, episode);
+      if (aniAbs !== null) console.error("SP: anilist absolute ep", aniAbs);
+      addEpCandidate(aniAbs);
+    }
+    addEpCandidate(rawEp);
+
     var slugs = [];
     for (var ti = 0; ti < titles.length; ti++) {
       var tSlugs = generateSlugs(titles[ti]);
@@ -32,11 +52,10 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
     }
     console.error("SP: slugs", slugs.join(", "));
+    console.error("SP: ep candidates", epCandidates.join(", "));
 
-    var rawEp = parseInt(episode, 10);
-    var mainEp = targetEp !== null ? targetEp : rawEp;
-
-    if (mainEp !== null && !isNaN(mainEp)) {
+    for (var ei = 0; ei < epCandidates.length; ei++) {
+      var mainEp = epCandidates[ei];
       for (var si = 0; si < slugs.length; si++) {
         if (!isUsableSlug(slugs[si])) continue;
         console.error("SP: try slug", slugs[si], "targetEp=" + mainEp);
@@ -64,17 +83,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
         var nResults = await scrapeSeasonPage(nSlug, episode, titles);
         console.error("SP: bare season slug result", nResults.length);
         if (nResults.length > 0) return nResults;
-      }
-    }
-
-    if (!isNaN(rawEp) && (targetEp === null || rawEp !== targetEp)) {
-      console.error("SP: trying main pages with raw ep", rawEp);
-      for (var si = 0; si < slugs.length; si++) {
-        if (!isUsableSlug(slugs[si])) continue;
-        console.error("SP: try raw-ep slug", slugs[si], "rawEp=" + rawEp);
-        var rawResults = await scrapeShowPage(slugs[si], rawEp);
-        console.error("SP: raw slug result", rawResults.length);
-        if (rawResults.length > 0) return rawResults;
       }
     }
 
@@ -280,6 +288,115 @@ async function getTmdbAbsoluteEp(tmdbId, season, episode) {
     return result;
   } catch (e) {
     console.error("TMDB absolute ep failed:", e.message);
+    return null;
+  }
+}
+
+// Resolve an absolute (cross-season) episode number from the AniList sequel
+// chain. Anime is frequently split into per-season AniList entries (e.g.
+// Kusuriya no Hitorigoto = 24 / 24 / 12), so the absolute episode for season S
+// is (sum of episodes of the TV entries before S) + episode. This matches the
+// way SubsPlease numbers releases continuously across a franchise.
+async function getAniListAbsoluteEp(titles, season, episode) {
+  try {
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    if (isNaN(seasonNum) || isNaN(epNum)) { console.error("AniListAbs: bad params"); return null; }
+    if (seasonNum < 1) { console.error("AniListAbs: season < 1"); return null; }
+    if (!titles || titles.length === 0) { console.error("AniListAbs: no titles"); return null; }
+
+    var node = null;
+    for (var i = 0; i < titles.length && !node; i++) {
+      node = await aniListMediaSearch(titles[i]);
+    }
+    if (!node) { console.error("AniListAbs: no base media"); return null; }
+    console.error("AniListAbs: base", node.id, node.episodes, node.format);
+
+    var offset = 0;
+    var seen = {};
+    seen[node.id] = true;
+    for (var s = 1; s < seasonNum; s++) {
+      offset += node.episodes || 0;
+      var sequel = findAniListSequel(node);
+      if (!sequel) { console.error("AniListAbs: no TV sequel at step " + s); return null; }
+      if (seen[sequel.id]) { console.error("AniListAbs: sequel cycle"); return null; }
+      seen[sequel.id] = true;
+      if (s === seasonNum - 1) {
+        if (!sequel.episodes) { console.error("AniListAbs: sequel episodes unknown"); return null; }
+        console.error("AniListAbs: offset=" + offset + " abs=" + (offset + epNum) + " (S" + seasonNum + "E" + epNum + ")");
+        return offset + epNum;
+      }
+      node = await aniListMediaById(sequel.id);
+      if (!node) { console.error("AniListAbs: sequel fetch failed"); return null; }
+    }
+
+    console.error("AniListAbs: offset=0 abs=" + epNum + " (S" + seasonNum + "E" + epNum + ")");
+    return epNum;
+  } catch (e) {
+    console.error("AniList absolute ep failed:", e.message);
+    return null;
+  }
+}
+
+function findAniListSequel(node) {
+  if (!node || !node.relations) return null;
+  for (var i = 0; i < node.relations.length; i++) {
+    var edge = node.relations[i];
+    if (edge && edge.relationType === "SEQUEL" && edge.node && edge.node.format === "TV") {
+      return edge.node;
+    }
+  }
+  return null;
+}
+
+function normalizeAniListMedia(media) {
+  if (!media) return null;
+  media.relations = (media.relations && media.relations.edges) ? media.relations.edges : [];
+  return media;
+}
+
+async function aniListMediaSearch(search) {
+  if (!search) return null;
+  try {
+    var query = "query ($search: String) { Media(search: $search, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { search: search } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs search failed:", e.message);
+    return null;
+  }
+}
+
+async function aniListMediaById(id) {
+  if (!id) return null;
+  try {
+    var query = "query ($id: Int) { Media(id: $id, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { id: id } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs fetch failed:", e.message);
     return null;
   }
 }

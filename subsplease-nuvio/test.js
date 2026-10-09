@@ -79,9 +79,49 @@ const SEIIN_PAGE =
   '<html><head><title>' + SEIIN_SHOW + ' downloads - SubsPlease</title></head>' +
   '<body><table id="show-release-table" sid="999"></table></body></html>';
 
+// Apothecary Diaries: TMDB has it as one 60-episode season, but the app splits
+// it AniList-style (24 / 24 / 12). S3E2 must map to the absolute episode 50.
+const APOTHECARY_HASH = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+const APOTHECARY_SLUG = "kusuriya-no-hitorigoto";
+const APOTHECARY_SHOW = "Kusuriya no Hitorigoto";
+const APOTHECARY_PAGE =
+  '<html><head><title>' + APOTHECARY_SHOW + ' downloads - SubsPlease</title></head>' +
+  '<body><table id="show-release-table" sid="671"></table></body></html>';
+
+function aniMedia(id, episodes, sequelId, sequelEpisodes) {
+  var edges = [];
+  if (sequelId) {
+    edges.push({ relationType: "SEQUEL", node: { id: sequelId, episodes: sequelEpisodes, format: "TV" } });
+  }
+  return {
+    id: id,
+    episodes: episodes,
+    format: "TV",
+    title: { romaji: "Kusuriya no Hitorigoto", english: "The Apothecary Diaries" },
+    relations: { edges: edges }
+  };
+}
+
+const ANILIST_BY_ID = {
+  161645: aniMedia(161645, 24, 176301, 24),
+  176301: aniMedia(176301, 24, 195516, 12),
+  195516: aniMedia(195516, 12, null, 0)
+};
+
 function fakeFetch(url, opts) {
   // TMDB show metadata: English name + non-ASCII original (Black Clover).
   if (url.indexOf("api.themoviedb.org/3/tv/") !== -1 && url.indexOf("/translations") === -1) {
+    if (url.indexOf("/220542") !== -1) {
+      return Promise.resolve({
+        status: 200,
+        json: () => Promise.resolve({
+          name: "The Apothecary Diaries",
+          original_name: "\u85AC\u5C4B\u306E\u3072\u3068\u308A\u3054\u3068",
+          seasons: [{ season_number: 0, episode_count: 51 }, { season_number: 1, episode_count: 60 }]
+        }),
+        text: () => Promise.resolve("")
+      });
+    }
     return Promise.resolve({
       status: 200,
       json: () => Promise.resolve({
@@ -96,7 +136,19 @@ function fakeFetch(url, opts) {
     return Promise.resolve({ status: 200, json: () => Promise.resolve({ translations: [] }), text: () => Promise.resolve("") });
   }
   if (url.indexOf("graphql.anilist.co") !== -1) {
-    return Promise.resolve({ status: 200, json: () => Promise.resolve({ data: { Media: { title: { romaji: null, english: null } } } }), text: () => Promise.resolve("") });
+    var reqBody = {};
+    try { reqBody = JSON.parse((opts && opts.body) || "{}"); } catch (e) {}
+    var vars = reqBody.variables || {};
+    var media = null;
+    if (vars.id) {
+      media = ANILIST_BY_ID[vars.id] || null;
+    } else if (vars.search === "The Apothecary Diaries" || vars.search === "Kusuriya no Hitorigoto") {
+      media = ANILIST_BY_ID[161645];
+    }
+    // Deep-clone: the plugin normalizes relations in place; a real fetch always
+    // returns a fresh object, so the shared fixture must not leak mutations.
+    if (media) media = JSON.parse(JSON.stringify(media));
+    return Promise.resolve({ status: 200, json: () => Promise.resolve({ data: { Media: media } }), text: () => Promise.resolve("") });
   }
   // SubsPlease show page: the "-2" slug resolves to a real, unrelated show.
   if (url.indexOf("subsplease.org/shows/") !== -1) {
@@ -104,10 +156,22 @@ function fakeFetch(url, opts) {
     if (slug === "-2") {
       return Promise.resolve({ status: 200, text: () => Promise.resolve(SEIIN_PAGE) });
     }
+    if (slug === APOTHECARY_SLUG) {
+      return Promise.resolve({ status: 200, text: () => Promise.resolve(APOTHECARY_PAGE) });
+    }
     return Promise.resolve({ status: 200, text: () => Promise.resolve("404 Not Found") });
   }
   // SubsPlease show API for sid 999 -> Seiin episode 02.
   if (url.indexOf("subsplease.org/api/") !== -1) {
+    if (url.indexOf("sid=671") !== -1) {
+      var apoBody = { episode: {} };
+      apoBody.episode[APOTHECARY_SHOW + " - 50"] = {
+        show: APOTHECARY_SHOW,
+        episode: "50",
+        downloads: [{ res: "1080", magnet: "magnet:?xt=urn:btih:" + APOTHECARY_HASH }]
+      };
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(apoBody), text: () => Promise.resolve("") });
+    }
     var body = { episode: {} };
     body.episode[SEIIN_SHOW + " - 02"] = {
       show: SEIIN_SHOW,
@@ -149,10 +213,24 @@ async function main() {
   assert("nameMatchesShow passes through with no titles",
     ctx.nameMatchesShow(SEIIN_SHOW, []) === true);
 
+  // ---- unit: getAniListAbsoluteEp (sequel-chain absolute numbering) ----
+  const apoTitles = ["The Apothecary Diaries", "\u85AC\u5C4B\u306E\u3072\u3068\u308A\u3054\u3068", "Kusuriya no Hitorigoto"];
+  assert("getAniListAbsoluteEp S1E2 = 2", (await ctx.getAniListAbsoluteEp(apoTitles, 1, 2)) === 2);
+  assert("getAniListAbsoluteEp S2E2 = 26", (await ctx.getAniListAbsoluteEp(apoTitles, 2, 2)) === 26);
+  assert("getAniListAbsoluteEp S3E2 = 50", (await ctx.getAniListAbsoluteEp(apoTitles, 3, 2)) === 50);
+  assert("getAniListAbsoluteEp unknown title = null",
+    (await ctx.getAniListAbsoluteEp(["Some Live Action Show"], 2, 1)) === null);
+
   // ---- integration: S2E2 must not return the "-2" wrong show ----
   const streams = await ctx.getStreams("71499", "tv", 2, 2);
   assert("getStreams('Black Clover' S2E2) returns no wrong-show streams", streams.length === 0);
   assert("getStreams never returns the Seiin show", streams.every(function (s) { return s.name.indexOf("Seiin") === -1; }));
+
+  // ---- integration: Apothecary S3E2 resolves via AniList absolute ep 50 ----
+  const apoStreams = await ctx.getStreams("220542", "tv", 3, 2);
+  assert("getStreams('The Apothecary Diaries' S3E2) returns a stream", apoStreams.length > 0);
+  assert("getStreams('The Apothecary Diaries' S3E2) resolves to absolute ep 50",
+    apoStreams.length > 0 && apoStreams[0].name === APOTHECARY_SHOW + " - 50");
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed === 0 ? 0 : 1);

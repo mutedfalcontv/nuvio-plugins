@@ -43,38 +43,69 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       ? await getKitsuTitles(tmdbId) : await getTitles(tmdbId);
     if (!titles || titles.length === 0) return [];
 
+    var reqSeason = parseInt(season, 10);
+    var rawEp = parseInt(episode, 10);
+
+    // Candidate (season, episode) pairs to match against. Anime seasons are
+    // often split differently by the app's metadata source (e.g. AniList
+    // 24/24/12) than by TMDB, and SubsPlease-style releases are numbered
+    // absolutely across the franchise, so also try the AniList-derived absolute
+    // episode as an unseasoned release.
+    var matchCandidates = [];
+    function addCand(s, e) {
+      if (isNaN(s) || isNaN(e)) return;
+      for (var i = 0; i < matchCandidates.length; i++) {
+        if (matchCandidates[i].season === s && matchCandidates[i].ep === e) return;
+      }
+      matchCandidates.push({ season: s, ep: e });
+    }
+    addCand(reqSeason, rawEp);
+
+    var aniAbs = await getAniListAbsoluteEp(titles, season, episode);
+    if (aniAbs !== null) {
+      console.error("Nyaa: anilist absolute ep", aniAbs);
+      addCand(1, aniAbs);
+    }
+
     var seen = {};
     var results = [];
 
     for (var ti = 0; ti < titles.length; ti++) {
-      var query = titles[ti] + " S" + padZero(season, 2);
-      var rssItems = await searchNyaa(query, NYAA_CATEGORIES.ENGLISH);
-      if (!rssItems || rssItems.length === 0) {
-        rssItems = await searchNyaa(query, NYAA_CATEGORIES.ALL);
-      }
+      var queries = buildQueries(titles[ti], reqSeason, aniAbs);
+      for (var qi = 0; qi < queries.length; qi++) {
+        var rssItems = await searchNyaa(queries[qi], NYAA_CATEGORIES.ENGLISH);
+        if (!rssItems || rssItems.length === 0) {
+          rssItems = await searchNyaa(queries[qi], NYAA_CATEGORIES.ALL);
+        }
 
-      for (var ri = 0; ri < rssItems.length; ri++) {
-        var item = rssItems[ri];
-        if (seen[item.infoHash]) continue;
-        seen[item.infoHash] = true;
+        for (var ri = 0; ri < rssItems.length; ri++) {
+          var item = rssItems[ri];
+          if (seen[item.infoHash]) continue;
+          seen[item.infoHash] = true;
 
-        var match = matchEpisode(item.title, season, episode);
-        if (!match) continue;
+          var match = false;
+          for (var ci = 0; ci < matchCandidates.length; ci++) {
+            if (matchEpisode(item.title, matchCandidates[ci].season, matchCandidates[ci].ep)) { match = true; break; }
+          }
+          if (!match) continue;
 
-        var quality = parseQuality(item.title);
-        var magnet = buildMagnet(item.infoHash, item.title);
+          var quality = parseQuality(item.title);
+          var magnet = buildMagnet(item.infoHash, item.title);
 
-        results.push({
-          title: item.title,
-          name: item.title,
-          url: magnet,
-          infoHash: item.infoHash.toLowerCase(),
-          quality: quality,
-          size: item.size,
-          seeders: item.seeders,
-          provider: "Nyaa",
-          type: "tv"
-        });
+          results.push({
+            title: item.title,
+            name: item.title,
+            url: magnet,
+            infoHash: item.infoHash.toLowerCase(),
+            quality: quality,
+            size: item.size,
+            seeders: item.seeders,
+            provider: "Nyaa",
+            type: "tv"
+          });
+        }
+
+        if (results.length > 0) break;
       }
 
       if (results.length > 0) break;
@@ -220,6 +251,124 @@ async function searchAniListTitle(englishTitle) {
     console.error("AniList title search failed:", e.message);
     return null;
   }
+}
+
+// Resolve an absolute (cross-season) episode number from the AniList sequel
+// chain. Anime is frequently split into per-season AniList entries (e.g.
+// Kusuriya no Hitorigoto = 24 / 24 / 12), so the absolute episode for season S
+// is (sum of episodes of the TV entries before S) + episode. This matches the
+// way SubsPlease numbers releases continuously across a franchise.
+async function getAniListAbsoluteEp(titles, season, episode) {
+  try {
+    var seasonNum = parseInt(season, 10);
+    var epNum = parseInt(episode, 10);
+    if (isNaN(seasonNum) || isNaN(epNum)) { console.error("AniListAbs: bad params"); return null; }
+    if (seasonNum < 1) { console.error("AniListAbs: season < 1"); return null; }
+    if (!titles || titles.length === 0) { console.error("AniListAbs: no titles"); return null; }
+
+    var node = null;
+    for (var i = 0; i < titles.length && !node; i++) {
+      node = await aniListMediaSearch(titles[i]);
+    }
+    if (!node) { console.error("AniListAbs: no base media"); return null; }
+    console.error("AniListAbs: base", node.id, node.episodes, node.format);
+
+    var offset = 0;
+    var seen = {};
+    seen[node.id] = true;
+    for (var s = 1; s < seasonNum; s++) {
+      offset += node.episodes || 0;
+      var sequel = findAniListSequel(node);
+      if (!sequel) { console.error("AniListAbs: no TV sequel at step " + s); return null; }
+      if (seen[sequel.id]) { console.error("AniListAbs: sequel cycle"); return null; }
+      seen[sequel.id] = true;
+      if (s === seasonNum - 1) {
+        if (!sequel.episodes) { console.error("AniListAbs: sequel episodes unknown"); return null; }
+        console.error("AniListAbs: offset=" + offset + " abs=" + (offset + epNum) + " (S" + seasonNum + "E" + epNum + ")");
+        return offset + epNum;
+      }
+      node = await aniListMediaById(sequel.id);
+      if (!node) { console.error("AniListAbs: sequel fetch failed"); return null; }
+    }
+
+    console.error("AniListAbs: offset=0 abs=" + epNum + " (S" + seasonNum + "E" + epNum + ")");
+    return epNum;
+  } catch (e) {
+    console.error("AniList absolute ep failed:", e.message);
+    return null;
+  }
+}
+
+function findAniListSequel(node) {
+  if (!node || !node.relations) return null;
+  for (var i = 0; i < node.relations.length; i++) {
+    var edge = node.relations[i];
+    if (edge && edge.relationType === "SEQUEL" && edge.node && edge.node.format === "TV") {
+      return edge.node;
+    }
+  }
+  return null;
+}
+
+function normalizeAniListMedia(media) {
+  if (!media) return null;
+  media.relations = (media.relations && media.relations.edges) ? media.relations.edges : [];
+  return media;
+}
+
+async function aniListMediaSearch(search) {
+  if (!search) return null;
+  try {
+    var query = "query ($search: String) { Media(search: $search, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { search: search } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs search failed:", e.message);
+    return null;
+  }
+}
+
+async function aniListMediaById(id) {
+  if (!id) return null;
+  try {
+    var query = "query ($id: Int) { Media(id: $id, type: ANIME) { id episodes format relations { edges { relationType node { id episodes format } } } } }";
+    var resp = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Nuvio/1.0"
+      },
+      body: JSON.stringify({ query: query, variables: { id: id } })
+    });
+    if (resp.status === 429) { console.error("AniListAbs: rate limited"); return null; }
+    var data = await resp.json();
+    if (!data || !data.data || !data.data.Media) return null;
+    return normalizeAniListMedia(data.data.Media);
+  } catch (e) {
+    console.error("AniListAbs fetch failed:", e.message);
+    return null;
+  }
+}
+
+function buildQueries(title, season, absEp) {
+  var queries = [];
+  var hasAbs = absEp !== null && absEp !== undefined && !isNaN(absEp);
+  if (hasAbs) queries.push(title + " " + absEp);
+  queries.push(title + " S" + padZero(season, 2));
+  if (hasAbs) queries.push(title);
+  return queries;
 }
 
 async function searchNyaa(query, category) {
