@@ -765,8 +765,65 @@ async function pipeline(ctx, title, s, e) {
   return results;
 }
 
+// ------------------------------------------------- ANILIST ABSOLUTE (offline)
+// Regression: the app's metadata source splits anime like AniList (e.g.
+// Kusuriya = 24/24/12) but TMDB can merge every cour into one season, so the
+// TMDB cumulative absolute is wrong for split shows. Nyaa must use the AniList
+// sequel chain so SubsPlease absolute-numbered releases still match.
+const ANILIST_CHAIN = {
+  161645: { id: 161645, episodes: 24, format: "TV", relations: { edges: [{ relationType: "SEQUEL", node: { id: 176301, episodes: 24, format: "TV" } }] } },
+  176301: { id: 176301, episodes: 24, format: "TV", relations: { edges: [{ relationType: "SEQUEL", node: { id: 195516, episodes: 12, format: "TV" } }] } },
+  195516: { id: 195516, episodes: 12, format: "TV", relations: { edges: [] } },
+};
+
+function aniAbsFetch() {
+  const nyaaRss = `<?xml version="1.0"?><rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+<title>[SubsPlease] Kusuriya no Hitorigoto - 50 (1080p)</title>
+<guid isPermaLink="false">https://nyaa.si/view/9</guid>
+<nyaa:infoHash>BBBB22222222222222222222222222222222222222</nyaa:infoHash>
+<nyaa:seeders>120</nyaa:seeders>
+<nyaa:leechers>3</nyaa:leechers>
+<nyaa:size>1.4 GiB</nyaa:size>
+<nyaa:categoryId>1_2</nyaa:categoryId>
+<nyaa:trusted>No</nyaa:trusted>
+</item></channel></rss>`;
+  return (url, init) => {
+    const u = String(url);
+    const ok = (obj) => Promise.resolve(Object.assign({ ok: true, status: 200 }, obj));
+    if (u.indexOf("graphql.anilist.co") !== -1) {
+      const body = JSON.parse(init.body);
+      const raw = body.variables.search ? ANILIST_CHAIN[161645] : ANILIST_CHAIN[body.variables.id];
+      const media = raw ? JSON.parse(JSON.stringify(raw)) : null;
+      return ok({ json: async () => ({ data: { Media: media } }) });
+    }
+    if (u.indexOf("api.themoviedb.org/3/tv/220542?") !== -1) {
+      return ok({ json: async () => ({ name: "The Apothecary Diaries", original_name: "Kusuriya no Hitorigoto", seasons: [{ season_number: 1, episode_count: 60 }] }) });
+    }
+    if (u.indexOf("alternative_titles") !== -1) return ok({ json: async () => ({ results: [] }) });
+    if (u.indexOf("/translations") !== -1) return ok({ json: async () => ({ translations: [] }) });
+    if (u.indexOf("nyaa.si") !== -1) return ok({ text: async () => nyaaRss });
+    return ok({ text: async () => "", json: async () => ({}) });
+  };
+}
+
+async function runAniListAbsolute() {
+  const ctx = loadSrc(aniAbsFetch(), { log() {}, error() {} });
+
+  assert("getAniListAbsoluteEp S3E2 = 50 (AniList 24/24/12)",
+    (await ctx.getAniListAbsoluteEp(["The Apothecary Diaries", "Kusuriya no Hitorigoto"], 3, 2)) === 50);
+  assert("getAniListAbsoluteEp S2E2 = 26",
+    (await ctx.getAniListAbsoluteEp(["The Apothecary Diaries"], 2, 2)) === 26);
+  assert("TMDB-only getAbsoluteEpisode is wrong for Apothecary (62, not 50)",
+    (await ctx.getAbsoluteEpisode(220542, 3, 2)) === 62);
+
+  const results = await ctx.getStreams("220542", "tv", 3, 2);
+  assert("getStreams S3E2 returns the SubsPlease absolute-ep release",
+    results.some(x => /subsplease/i.test(x.title)));
+}
+
 // ---------------------------------------------------------------- RUN
 runOffline()
+  .then(() => runAniListAbsolute())
   .then(() => process.env.LIVE ? runLive() : Promise.resolve())
   .then(() => {
     console.log("\n" + (failures === 0 ? "ALL TESTS PASSED" : failures + " FAILURE(S)"));
