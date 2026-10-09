@@ -29,19 +29,22 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     // Candidate absolute episodes to try, in priority order. Anime seasons are
     // often split differently by the app's metadata source (e.g. AniList
     // 24/24/12) than by TMDB (one long season), so the TMDB-derived absolute
-    // episode can be wrong. Add the AniList-derived absolute episode too and
-    // let the first candidate that yields a release win.
+    // episode can be wrong. Prefer the AniList-derived absolute episode for
+    // anime, then fall back to the TMDB/Kitsu-derived one, then the raw
+    // episode; the first candidate that yields a release wins. Trying the
+    // AniList value first avoids a redundant re-fetch of the matching slug
+    // when the TMDB value is wrong.
     var epCandidates = [];
     function addEpCandidate(v) {
       if (v === null || v === undefined || isNaN(v)) return;
       if (epCandidates.indexOf(v) === -1) epCandidates.push(v);
     }
-    addEpCandidate(targetEp);
     if (!isKitsu) {
       var aniAbs = await getAniListAbsoluteEp(titles, season, episode);
       if (aniAbs !== null) console.error("SP: anilist absolute ep", aniAbs);
       addEpCandidate(aniAbs);
     }
+    addEpCandidate(targetEp);
     addEpCandidate(rawEp);
 
     var slugs = [];
