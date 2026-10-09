@@ -88,6 +88,14 @@ const APOTHECARY_PAGE =
   '<html><head><title>' + APOTHECARY_SHOW + ' downloads - SubsPlease</title></head>' +
   '<body><table id="show-release-table" sid="671"></table></body></html>';
 
+// Apothecary Diaries S3: the pre-fix degenerate "-3" season slug resolved to a
+// completely unrelated show, which must never be surfaced.
+const WRONG3_HASH = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const WRONG3_SHOW = "30-sai made Doutei dato Mahoutsukai ni Nareru Rashii";
+const WRONG3_PAGE =
+  '<html><head><title>' + WRONG3_SHOW + ' downloads - SubsPlease</title></head>' +
+  '<body><table id="show-release-table" sid="998"></table></body></html>';
+
 function aniMedia(id, episodes, sequelId, sequelEpisodes) {
   var edges = [];
   if (sequelId) {
@@ -156,6 +164,9 @@ function fakeFetch(url, opts) {
     if (slug === "-2") {
       return Promise.resolve({ status: 200, text: () => Promise.resolve(SEIIN_PAGE) });
     }
+    if (slug === "-3") {
+      return Promise.resolve({ status: 200, text: () => Promise.resolve(WRONG3_PAGE) });
+    }
     if (slug === APOTHECARY_SLUG) {
       return Promise.resolve({ status: 200, text: () => Promise.resolve(APOTHECARY_PAGE) });
     }
@@ -171,6 +182,15 @@ function fakeFetch(url, opts) {
         downloads: [{ res: "1080", magnet: "magnet:?xt=urn:btih:" + APOTHECARY_HASH }]
       };
       return Promise.resolve({ status: 200, json: () => Promise.resolve(apoBody), text: () => Promise.resolve("") });
+    }
+    if (url.indexOf("sid=998") !== -1) {
+      var w3Body = { episode: {} };
+      w3Body.episode[WRONG3_SHOW + " - 02"] = {
+        show: WRONG3_SHOW,
+        episode: "02",
+        downloads: [{ res: "1080", magnet: "magnet:?xt=urn:btih:" + WRONG3_HASH }]
+      };
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(w3Body), text: () => Promise.resolve("") });
     }
     var body = { episode: {} };
     body.episode[SEIIN_SHOW + " - 02"] = {
@@ -231,6 +251,8 @@ async function main() {
   assert("getStreams('The Apothecary Diaries' S3E2) returns a stream", apoStreams.length > 0);
   assert("getStreams('The Apothecary Diaries' S3E2) resolves to absolute ep 50",
     apoStreams.length > 0 && apoStreams[0].name === APOTHECARY_SHOW + " - 50");
+  assert("getStreams('The Apothecary Diaries' S3E2) never returns the degenerate-s3 show",
+    apoStreams.every(function (s) { return s.name.indexOf(WRONG3_SHOW) === -1; }));
 
   console.log("\n" + passed + " passed, " + failed + " failed");
   process.exit(failed === 0 ? 0 : 1);
