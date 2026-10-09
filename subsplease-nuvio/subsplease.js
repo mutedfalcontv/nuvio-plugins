@@ -38,6 +38,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     if (mainEp !== null && !isNaN(mainEp)) {
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         console.error("SP: try slug", slugs[si], "targetEp=" + mainEp);
         var pageResults = await scrapeShowPage(slugs[si], mainEp);
         console.error("SP: slug result", pageResults.length);
@@ -49,18 +50,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (seasonNum > 1 && slugs.length > 0) {
       console.error("SP: trying season pages for S" + seasonNum);
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         var sSlug = slugs[si] + "-s" + seasonNum;
         console.error("SP: try season slug", sSlug);
-        var sResults = await scrapeSeasonPage(sSlug, episode);
-        console.error("SP: season slug result", sResults.length);
+        var sResults = await scrapeSeasonPage(sSlug, episode, titles);
+        console.error("SP: sSlug result", sResults.length);
         if (sResults.length > 0) return sResults;
       }
-      // Try without 's' prefix (handles rare -{N} pattern like bukiyou-na-senpai-2)
-      console.error("SP: trying bare-number season pages for S" + seasonNum);
       for (var si = 0; si < slugs.length; si++) {
+        if (!isUsableSlug(slugs[si])) continue;
         var nSlug = slugs[si] + "-" + seasonNum;
         console.error("SP: try bare season slug", nSlug);
-        var nResults = await scrapeSeasonPage(nSlug, episode);
+        var nResults = await scrapeSeasonPage(nSlug, episode, titles);
         console.error("SP: bare season slug result", nResults.length);
         if (nResults.length > 0) return nResults;
       }
@@ -69,7 +70,8 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!isNaN(rawEp) && (targetEp === null || rawEp !== targetEp)) {
       console.error("SP: trying main pages with raw ep", rawEp);
       for (var si = 0; si < slugs.length; si++) {
-        console.error("SP: try slug raw", slugs[si], rawEp);
+        if (!isUsableSlug(slugs[si])) continue;
+        console.error("SP: try raw-ep slug", slugs[si], "rawEp=" + rawEp);
         var rawResults = await scrapeShowPage(slugs[si], rawEp);
         console.error("SP: raw slug result", rawResults.length);
         if (rawResults.length > 0) return rawResults;
@@ -283,6 +285,7 @@ async function getTmdbAbsoluteEp(tmdbId, season, episode) {
 }
 
 async function scrapeShowPage(slug, targetEp) {
+  if (!isUsableSlug(slug)) return [];
   try {
     var url = "https://subsplease.org/shows/" + slug + "/";
     var resp = await fetch(url, {
@@ -356,7 +359,8 @@ async function scrapeShowPage(slug, targetEp) {
   }
 }
 
-async function scrapeSeasonPage(seasonSlug, episode) {
+async function scrapeSeasonPage(seasonSlug, episode, expectedTitles) {
+  if (!isUsableSlug(seasonSlug)) return [];
   try {
     var url = "https://subsplease.org/shows/" + seasonSlug + "/";
     console.error("SP: fetching season page", url);
@@ -389,6 +393,11 @@ async function scrapeSeasonPage(seasonSlug, episode) {
       var itemEp = parseInt(item.episode, 10);
       if (isNaN(itemEp)) continue;
       if (itemEp !== epNum) continue;
+
+      if (expectedTitles && expectedTitles.length > 0 && !nameMatchesShow(item.show, expectedTitles)) {
+        console.error("SP: season show mismatch, rejecting", item.show);
+        continue;
+      }
 
       for (var di = 0; di < item.downloads.length; di++) {
         var dl = item.downloads[di];
@@ -493,14 +502,45 @@ function generateSlugs(title) {
 
   var deduped = [];
   for (var si = 0; si < slugs.length; si++) {
-    if (deduped.indexOf(slugs[si]) === -1) {
+    if (isUsableSlug(slugs[si]) && deduped.indexOf(slugs[si]) === -1) {
       deduped.push(slugs[si]);
     }
   }
   for (var si = 0; si < extra.length; si++) {
-    deduped.push(extra[si]);
+    if (isUsableSlug(extra[si]) && deduped.indexOf(extra[si]) === -1) {
+      deduped.push(extra[si]);
+    }
   }
   return deduped;
+}
+
+function isUsableSlug(slug) {
+  return typeof slug === "string" && slug.length >= 2 && /[a-z0-9]/.test(slug);
+}
+
+function showNameTokens(name) {
+  return (name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter(function(w) {
+    return w.length >= 3;
+  });
+}
+
+function nameMatchesShow(showName, titles) {
+  if (!titles || titles.length === 0) return true;
+  var showNorm = (showName || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!showNorm) return true;
+  var showTokens = showNameTokens(showName);
+  for (var i = 0; i < titles.length; i++) {
+    var tNorm = (titles[i] || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!tNorm) continue;
+    if (tNorm.indexOf(showNorm) !== -1 || showNorm.indexOf(tNorm) !== -1) return true;
+    var tTokens = showNameTokens(titles[i]);
+    for (var a = 0; a < showTokens.length; a++) {
+      for (var b = 0; b < tTokens.length; b++) {
+        if (showTokens[a] === tTokens[b]) return true;
+      }
+    }
+  }
+  return false;
 }
 
 module.exports = { getStreams };

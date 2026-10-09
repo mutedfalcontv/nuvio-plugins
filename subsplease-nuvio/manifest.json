@@ -1,14 +1,14 @@
 {
   "name": "SubsPlease Anime",
-  "version": "1.1.0",
-  "description": "Stream anime directly from SubsPlease with 1080p, 720p, and 480p direct download links",
+  "version": "1.1.1",
+  "description": "Stream anime directly from SubsPlease - hardened slug resolution prevents wrong-show results",
   "author": "ajinkyajacob",
   "scrapers": [
     {
       "id": "subsplease",
       "name": "SubsPlease",
       "description": "SubsPlease anime direct downloads",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "filename": "subsplease.js",
       "supportedTypes": ["tv"],
       "contentLanguage": ["en", "ja"],
