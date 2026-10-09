@@ -47,7 +47,14 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     addEpCandidate(targetEp);
     addEpCandidate(rawEp);
 
+    // Canonical slugs from the SubsPlease search API come first: they survive
+    // title differences (romanization, punctuation) that generateSlugs can miss.
     var slugs = [];
+    var searchSlugs = await resolveSlugViaSearch(titles);
+    if (searchSlugs.length > 0) console.error("SP: search slugs", searchSlugs.join(", "));
+    for (var qi = 0; qi < searchSlugs.length; qi++) {
+      if (slugs.indexOf(searchSlugs[qi]) === -1) slugs.push(searchSlugs[qi]);
+    }
     for (var ti = 0; ti < titles.length; ti++) {
       var tSlugs = generateSlugs(titles[ti]);
       for (var si = 0; si < tSlugs.length; si++) {
@@ -661,6 +668,51 @@ function nameMatchesShow(showName, titles) {
     }
   }
   return false;
+}
+
+// Resolve canonical SubsPlease slugs from the search API. The endpoint returns
+// recent uploads keyed "<Show> - <ep>"; each value carries the canonical "page"
+// slug (e.g. "kusuriya-no-hitorigoto"). This maps titles that generateSlugs
+// cannot reproduce (romanization/spelling differences). It is best-effort:
+// any failure falls back silently to the generated slugs. English-only titles
+// usually miss (the index is romaji), so query every known title until one hits.
+async function resolveSlugViaSearch(titles) {
+  var found = [];
+  if (!titles || titles.length === 0) return found;
+  for (var i = 0; i < titles.length; i++) {
+    var query = titles[i];
+    if (!query) continue;
+    var data = null;
+    try {
+      var url = "https://subsplease.org/api/?f=search&tz=UTC&s=" + encodeURIComponent(query);
+      var resp = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "X-Requested-With": "XMLHttpRequest"
+        }
+      });
+      data = await resp.json();
+    } catch (e) {
+      console.error("SP: search failed for", query, e.message);
+      continue;
+    }
+    // Empty array (or non-object) means no match for this title.
+    if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+    var matched = [];
+    for (var key in data) {
+      var item = data[key];
+      if (!item || !item.page) continue;
+      var slug = String(item.page).trim();
+      if (!isUsableSlug(slug)) continue;
+      if (!nameMatchesShow(item.show || key, [query])) continue;
+      if (matched.indexOf(slug) === -1) matched.push(slug);
+    }
+    for (var mi = 0; mi < matched.length; mi++) {
+      if (found.indexOf(matched[mi]) === -1) found.push(matched[mi]);
+    }
+    if (found.length > 0) break;
+  }
+  return found;
 }
 
 module.exports = { getStreams };

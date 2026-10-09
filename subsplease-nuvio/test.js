@@ -174,6 +174,22 @@ function fakeFetch(url, opts) {
   }
   // SubsPlease show API for sid 999 -> Seiin episode 02.
   if (url.indexOf("subsplease.org/api/") !== -1) {
+    // Search API -> canonical slug, keyed "<Show> - <ep>".
+    if (url.indexOf("f=search") !== -1) {
+      if (url.indexOf("Kusuriya") !== -1) {
+        var searchBody = {};
+        searchBody[APOTHECARY_SHOW + " - 50"] = { show: APOTHECARY_SHOW, episode: "50", page: APOTHECARY_SLUG };
+        return Promise.resolve({ status: 200, json: () => Promise.resolve(searchBody), text: () => Promise.resolve("") });
+      }
+      // Substring hit on an unrelated show: must be filtered by nameMatchesShow.
+      if (url.indexOf("Black") !== -1) {
+        var blBody = {};
+        blBody[SEIIN_SHOW + " - 02"] = { show: SEIIN_SHOW, episode: "02", page: "seiin-koukou-danshi-volley-bu" };
+        return Promise.resolve({ status: 200, json: () => Promise.resolve(blBody), text: () => Promise.resolve("") });
+      }
+      // English-only titles miss: subsplease answers with an empty array.
+      return Promise.resolve({ status: 200, json: () => Promise.resolve([]), text: () => Promise.resolve("") });
+    }
     if (url.indexOf("sid=671") !== -1) {
       var apoBody = { episode: {} };
       apoBody.episode[APOTHECARY_SHOW + " - 50"] = {
@@ -240,6 +256,14 @@ async function main() {
   assert("getAniListAbsoluteEp S3E2 = 50", (await ctx.getAniListAbsoluteEp(apoTitles, 3, 2)) === 50);
   assert("getAniListAbsoluteEp unknown title = null",
     (await ctx.getAniListAbsoluteEp(["Some Live Action Show"], 2, 1)) === null);
+
+  // ---- unit: resolveSlugViaSearch (canonical slug from the search API) ----
+  const searchHit = await ctx.resolveSlugViaSearch(["Kusuriya no Hitorigoto"]);
+  assert("resolveSlugViaSearch returns the canonical slug", searchHit.indexOf(APOTHECARY_SLUG) !== -1);
+  const searchFiltered = await ctx.resolveSlugViaSearch(["Black Clover"]);
+  assert("resolveSlugViaSearch filters unrelated substring hits", searchFiltered.length === 0);
+  const searchMiss = await ctx.resolveSlugViaSearch(["Nonexistent English Title"]);
+  assert("resolveSlugViaSearch returns [] on English miss", searchMiss.length === 0);
 
   // ---- integration: S2E2 must not return the "-2" wrong show ----
   const streams = await ctx.getStreams("71499", "tv", 2, 2);
